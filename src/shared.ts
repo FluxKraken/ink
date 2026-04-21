@@ -1,0 +1,1372 @@
+import type * as CSS from "csstype";
+
+/** Primitive CSS value before unit formatting. */
+export type PrimitiveStyleValue = string | number;
+
+type NodeRequire = ((id: string) => unknown) & {
+  resolve?: (id: string) => string;
+};
+type NodeModule = {
+  createRequire: (url: string) => NodeRequire;
+};
+
+let nodeRequire: NodeRequire | null | undefined;
+let tailwindMergeFn: ((...classLists: string[]) => string) | null | undefined;
+const TAILWIND_MERGE_GLOBAL_KEY = "__ink_tailwind_merge__";
+
+function setTailwindMergeGlobal(
+  mergeFn: ((...classLists: string[]) => string) | undefined,
+): void {
+  const target = globalThis as Record<string, unknown>;
+  if (mergeFn) {
+    target[TAILWIND_MERGE_GLOBAL_KEY] = mergeFn;
+  } else {
+    delete target[TAILWIND_MERGE_GLOBAL_KEY];
+  }
+}
+
+const GENERIC_FONT_FAMILIES = new Set([
+  "serif",
+  "sans-serif",
+  "monospace",
+  "cursive",
+  "fantasy",
+  "system-ui",
+  "ui-serif",
+  "ui-sans-serif",
+  "ui-monospace",
+  "ui-rounded",
+  "emoji",
+  "math",
+  "fangsong",
+]);
+
+/** Reference to a CSS custom property created by {@link cVar}. */
+export interface CssVarRef {
+  /** Discriminator for {@link CssVarRef} values. */
+  kind: "ink-var";
+  /** CSS custom property name (for example `"--brand"`). */
+  name: string;
+  /** Optional fallback value used in `var()` output. */
+  fallback?: PrimitiveStyleValue;
+}
+/** CSS value accepted by style declarations. */
+export type StyleValue =
+  | PrimitiveStyleValue
+  | CssVarRef
+  | readonly (PrimitiveStyleValue | CssVarRef)[];
+/** Input accepted by {@link tw}. */
+export type TailwindClassInput = string | readonly string[];
+/** Tailwind class marker used by `@apply` and direct style entries. */
+export interface TailwindClassValue {
+  /** Discriminator for {@link TailwindClassValue}. */
+  kind: "ink-tailwind";
+  /** Raw class list segments passed to `tailwind-merge`. */
+  classNames: readonly string[];
+}
+/** Object form accepted by the `@set` directive. */
+export interface ContainerSetInput {
+  /** Container name used in `@set`. */
+  name: string;
+  /** Optional CSS container type (defaults to `"inline-size"` at runtime). */
+  type?: string;
+}
+/** Input accepted by the `@set` directive. */
+export type SetInput =
+  | string
+  | ContainerSetInput
+  | readonly SetInput[];
+/** Layered `@apply` payload that nests merged rules under a CSS layer. */
+export interface LayeredApplyInput {
+  /** Rules merged by `@apply`. */
+  rules: ApplyInput;
+  /** Optional CSS layer name. */
+  layer?: string;
+}
+/** Input accepted by the `@apply` directive. */
+export type ApplyInput =
+  | string
+  | TailwindClassValue
+  | NestedStyleDeclaration
+  | LayeredApplyInput
+  | readonly ApplyInput[];
+type CssPropertyName = keyof CSS.Properties;
+/** Known camelCase CSS property names surfaced for TypeScript completions. */
+type CssPropertyDeclaration = {
+  [Property in CssPropertyName]?: StyleValue;
+};
+/** CSS custom properties emitted on `:root` (optionally within a layer). */
+export type RootVarInput =
+  | Record<string, StyleValue>
+  | {
+    vars: Record<string, StyleValue>;
+    layer?: string;
+  };
+/** Friendly token map accepted by {@link Theme}. */
+export type ThemeTokenInput = Record<string, StyleValue>;
+/** Theme expansion strategy used for imported themes. */
+export type ThemeMode = "scope" | "color-scheme";
+/** Theme-like value accepted by `themes`. */
+export type ThemeInput = Theme | ThemeTokenInput;
+/** Map of imported theme names/selectors to theme definitions. */
+export type ImportedThemesInput = Record<string, ThemeInput>;
+/** Flat style object with only CSS declarations. */
+export type PseudoStyleDeclaration = Record<string, StyleValue>;
+/** Recursive style object supporting nested selectors and at-rules. */
+export type NestedStyleDeclaration = CssPropertyDeclaration & {
+  [key: string]:
+    | StyleValue
+    | NestedStyleDeclaration
+    | ApplyInput
+    | SetInput;
+};
+/** Style object for a single class name. */
+export type StyleDeclaration = NestedStyleDeclaration;
+/** Map of class keys to their style declarations. */
+export type StyleSheet = Record<string, StyleDeclaration>;
+
+/** Base shape for importing global style objects with a layer. */
+export interface ImportRuleObject {
+  /** The CSS style object to import as global rules. */
+  rules: StyleSheet;
+  /** Optional layer name for the imported styles. */
+  layer?: string;
+}
+
+/** Base shape for importing external CSS files with a layer. */
+export interface ImportPathObject {
+  /** The external CSS string path to import. */
+  path: string;
+  /** Optional layer name for the imported styles. */
+  layer?: string;
+}
+
+/** Singular import input item. */
+export type SingularImportInput =
+  | string
+  | StyleSheet
+  | ImportPathObject
+  | ImportRuleObject;
+
+/** Import shapes accepted by the `.import()` method. */
+export type ImportInput = SingularImportInput | readonly SingularImportInput[];
+
+/** Optional serialization settings shared by runtime and build-time extraction. */
+export interface CssSerializationOptions {
+  /** Named breakpoint aliases (for example `{ md: "48rem" }` used as `"@md"`). */
+  breakpoints?: Record<string, string>;
+  /** Named container presets (for example `{ card: { type: "inline-size", rule: "width < 20rem" } }`). */
+  containers?: Record<string, { type?: string; rule: string }>;
+  /** Default unit for numeric style values (for example `"px"` or `"rem"`). */
+  defaultUnit?: string;
+  /** Explicit CSS layer order emitted as `@layer a, b, c;`. */
+  layers?: readonly string[];
+}
+
+function isPrimitiveThemeValue(
+  value: unknown,
+): value is PrimitiveStyleValue | CssVarRef {
+  return typeof value === "string" || typeof value === "number" ||
+    isCssVarRef(value);
+}
+
+function isThemeStyleValue(value: unknown): value is StyleValue {
+  return isPrimitiveThemeValue(value) ||
+    (Array.isArray(value) &&
+      value.every((entry) => isPrimitiveThemeValue(entry)));
+}
+
+/** Convert a theme token name like `headerBG` to a CSS custom property name. */
+export function toThemeVarName(token: string): string {
+  const trimmed = token.trim();
+  if (trimmed.length === 0) {
+    throw new Error("Theme token names must not be empty.");
+  }
+
+  return trimmed.startsWith("--") ? trimmed : `--${camelToKebab(trimmed)}`;
+}
+
+function normalizeThemeTokens(
+  tokens: Record<string, unknown>,
+): Record<string, StyleValue> {
+  const vars: Record<string, StyleValue> = {};
+
+  for (const [token, value] of Object.entries(tokens)) {
+    if (!isThemeStyleValue(value)) {
+      throw new Error(
+        `Theme token "${token}" must be a string, number, ink variable reference, or array of those values.`,
+      );
+    }
+    vars[toThemeVarName(token)] = value;
+  }
+
+  return vars;
+}
+
+/** First-class theme definition used by `themes`. */
+export class Theme {
+  /** Discriminator used for theme detection across parsing/runtime paths. */
+  readonly kind = "ink-theme" as const;
+  /** Normalized CSS custom properties emitted for this theme. */
+  readonly vars: Record<string, StyleValue>;
+
+  constructor(tokens: ThemeTokenInput) {
+    this.vars = normalizeThemeTokens(tokens);
+  }
+}
+
+/** Type guard for {@link Theme} values. */
+export function isTheme(value: unknown): value is Theme {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    (value as { kind?: unknown }).kind === "ink-theme" &&
+    "vars" in value &&
+    typeof (value as { vars?: unknown }).vars === "object" &&
+    (value as { vars?: unknown }).vars !== null &&
+    !Array.isArray((value as { vars?: unknown }).vars)
+  );
+}
+
+/** Create a theme-backed CSS variable reference from a friendly token name. */
+export function themeVar(
+  token: string,
+  fallback?: PrimitiveStyleValue,
+): CssVarRef {
+  return cVar(toThemeVarName(token), fallback);
+}
+
+/** Expand `{token}` placeholders into `var(--token)` references. */
+export function evalThemeTemplate(template: string): string {
+  return template.replace(/\{([^{}]+)\}/g, (_match, token: string) => {
+    const varName = toThemeVarName(token.trim());
+    return `var(${varName})`;
+  });
+}
+
+export type ThemeVarAccessor = Record<string, CssVarRef> & {
+  /** Expand a CSS string template containing `{token}` placeholders. */
+  eval(template: string): string;
+};
+
+/** Proxy that maps `tVar.headerBG` to `var(--header-bg)`. */
+export const tVar = new Proxy({} as ThemeVarAccessor, {
+  get(_target, prop) {
+    if (typeof prop !== "string") {
+      return undefined;
+    }
+    if (prop === "eval") {
+      return evalThemeTemplate;
+    }
+    return themeVar(prop);
+  },
+}) as ThemeVarAccessor;
+
+function resolveImportedThemeVars(
+  theme: ThemeInput,
+): Record<string, StyleValue> {
+  return isTheme(theme) ? theme.vars : normalizeThemeTokens(theme);
+}
+
+function toThemeScopeSelector(scope: string): string | null {
+  const trimmed = scope.trim();
+  if (
+    trimmed.length === 0 || trimmed === "default" || trimmed === "root" ||
+    trimmed === ":root"
+  ) {
+    return null;
+  }
+
+  if (
+    /^[.#:[*]/.test(trimmed) ||
+    /[.#:[\]\s>+~]/.test(trimmed)
+  ) {
+    return trimmed;
+  }
+
+  return `.${trimmed}`;
+}
+
+function toColorSchemeThemeName(scope: string): "default" | "dark" | null {
+  const trimmed = scope.trim();
+  if (
+    trimmed.length === 0 || trimmed === "default" || trimmed === "root" ||
+    trimmed === ":root"
+  ) {
+    return "default";
+  }
+  return trimmed === "dark" ? "dark" : null;
+}
+
+/** Expand `themes` into `root` vars and mode-specific global rules. */
+export function themesToConfig(
+  themes: ImportedThemesInput | undefined,
+  themeMode: ThemeMode = "scope",
+): {
+  root: RootVarInput[];
+  global: StyleSheet;
+} {
+  const root: RootVarInput[] = [];
+  const global: StyleSheet = {};
+
+  if (!themes) {
+    return { root, global };
+  }
+
+  for (const [scope, theme] of Object.entries(themes)) {
+    const vars = resolveImportedThemeVars(theme);
+
+    if (themeMode === "color-scheme") {
+      const themeName = toColorSchemeThemeName(scope);
+      if (themeName === null) {
+        throw new Error(
+          `themeMode "color-scheme" only supports "default", "root", ":root", and "dark" theme keys. Received "${scope}".`,
+        );
+      }
+
+      if (themeName === "default") {
+        root.push(vars);
+        continue;
+      }
+
+      const mediaKey = "@media (prefers-color-scheme: dark)";
+      const currentRule = (global[mediaKey] as
+        | Record<string, StyleValue | StyleDeclaration>
+        | undefined) ??
+        {};
+      const currentRoot =
+        (currentRule[":root"] as Record<string, StyleValue> | undefined) ?? {};
+      currentRule[":root"] = { ...currentRoot, ...vars };
+      global[mediaKey] = currentRule as StyleDeclaration;
+      continue;
+    }
+
+    const selector = toThemeScopeSelector(scope);
+
+    if (selector === null) {
+      root.push(vars);
+      continue;
+    }
+
+    const scopeKey = `@scope (${selector})`;
+    const currentRule = (global[scopeKey] as
+      | Record<string, StyleValue | StyleDeclaration>
+      | undefined) ??
+      {};
+    const currentScope =
+      (currentRule[":scope"] as Record<string, StyleValue> | undefined) ?? {};
+    currentRule[":scope"] = { ...currentScope, ...vars };
+    global[scopeKey] = currentRule as StyleDeclaration;
+  }
+
+  return { root, global };
+}
+
+const UNITLESS_PROPERTIES = new Set([
+  "line-height",
+  "font-weight",
+  "opacity",
+  "z-index",
+  "flex",
+  "flex-grow",
+  "flex-shrink",
+  "order",
+  "grid-row",
+  "grid-column",
+]);
+
+const COMMA_DELIMITED_PROPERTIES = new Set([
+  "animation",
+  "animation-delay",
+  "animation-direction",
+  "animation-duration",
+  "animation-fill-mode",
+  "animation-iteration-count",
+  "animation-name",
+  "animation-play-state",
+  "animation-timing-function",
+  "background",
+  "background-attachment",
+  "background-clip",
+  "background-image",
+  "background-origin",
+  "background-position",
+  "background-repeat",
+  "background-size",
+  "box-shadow",
+  "font-family",
+  "mask",
+  "mask-clip",
+  "mask-composite",
+  "mask-image",
+  "mask-mode",
+  "mask-origin",
+  "mask-position",
+  "mask-repeat",
+  "mask-size",
+  "text-shadow",
+  "transition",
+  "transition-delay",
+  "transition-duration",
+  "transition-property",
+  "transition-timing-function",
+]);
+
+const AUTO_URL_IMAGE_PROPERTIES = new Set([
+  "background",
+  "background-image",
+  "border-image",
+  "border-image-source",
+  "list-style",
+  "list-style-image",
+  "mask",
+  "mask-border",
+  "mask-border-source",
+  "mask-image",
+]);
+
+const IMAGE_ASSET_VALUE_PATTERN =
+  /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|tiff?|webp)(?:[?#].*)?$/i;
+
+const RAW_CSS_IMAGE_PREFIXES = [
+  "conic-gradient(",
+  "cross-fade(",
+  "element(",
+  "image(",
+  "image-set(",
+  "linear-gradient(",
+  "paint(",
+  "radial-gradient(",
+  "repeating-conic-gradient(",
+  "repeating-linear-gradient(",
+  "repeating-radial-gradient(",
+  "url(",
+  "var(",
+];
+
+function shouldAutoWrapImageValue(property: string, value: string): boolean {
+  if (!AUTO_URL_IMAGE_PROPERTIES.has(property)) {
+    return false;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  if (
+    normalized === "none" ||
+    RAW_CSS_IMAGE_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+  ) {
+    return false;
+  }
+
+  if (
+    normalized.startsWith("data:image/") ||
+    normalized.startsWith("blob:")
+  ) {
+    return true;
+  }
+
+  return IMAGE_ASSET_VALUE_PATTERN.test(trimmed);
+}
+
+function formatCssImageUrl(value: string): string {
+  return `url(${JSON.stringify(value.trim())})`;
+}
+
+function shouldQuoteFontFamily(value: string): boolean {
+  return !/^-?-?[_A-Za-z][-_A-Za-z0-9]*$/.test(value);
+}
+
+function formatFontFamily(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error("font() family names must not be empty.");
+  }
+
+  const normalized = trimmed.toLowerCase();
+  if (
+    isQuotedCssString(trimmed) ||
+    GENERIC_FONT_FAMILIES.has(normalized) ||
+    trimmed.startsWith("var(")
+  ) {
+    return trimmed;
+  }
+
+  return shouldQuoteFontFamily(trimmed) ? JSON.stringify(trimmed) : trimmed;
+}
+
+/** Create a CSS-safe `font-family` list from font names. */
+export function font(families: readonly string[]): string {
+  if (!Array.isArray(families)) {
+    throw new Error("font() expects an array of font family names.");
+  }
+
+  if (families.length === 0) {
+    throw new Error("font() expects at least one font family name.");
+  }
+
+  return families.map((family) => {
+    if (typeof family !== "string") {
+      throw new Error("font() family names must be strings.");
+    }
+    return formatFontFamily(family);
+  }).join(", ");
+}
+
+function getBuiltinModule(id: string): unknown | null {
+  const processValue = (globalThis as { process?: unknown }).process;
+  if (!processValue || typeof processValue !== "object") {
+    return null;
+  }
+
+  const getBuiltinModule =
+    (processValue as { getBuiltinModule?: unknown }).getBuiltinModule;
+  if (typeof getBuiltinModule !== "function") {
+    return null;
+  }
+
+  try {
+    return (getBuiltinModule as (name: string) => unknown)(id);
+  } catch {
+    return null;
+  }
+}
+
+function getFallbackRequire(): NodeRequire | null {
+  try {
+    const req = new Function(
+      'return typeof require === "function" ? require : null;',
+    )();
+    return typeof req === "function" ? (req as NodeRequire) : null;
+  } catch {
+    return null;
+  }
+}
+
+function getNodeRequire(): NodeRequire | null {
+  if (nodeRequire !== undefined) {
+    return nodeRequire;
+  }
+
+  const moduleBuiltin = getBuiltinModule("node:module") as NodeModule | null;
+  if (moduleBuiltin && typeof moduleBuiltin.createRequire === "function") {
+    nodeRequire = moduleBuiltin.createRequire(import.meta.url);
+    return nodeRequire;
+  }
+
+  nodeRequire = getFallbackRequire();
+  return nodeRequire;
+}
+
+function normalizeTailwindClassInput(input: TailwindClassInput): string[] {
+  const entries = typeof input === "string" ? [input] : [...input];
+  const normalized: string[] = [];
+
+  for (const entry of entries) {
+    if (typeof entry !== "string") {
+      throw new Error("tw() expects a string or an array of strings.");
+    }
+
+    const trimmed = entry.trim();
+    if (trimmed.length > 0) {
+      normalized.push(trimmed);
+    }
+  }
+
+  return normalized;
+}
+
+/** Create a Tailwind class marker for `@apply` or direct style entries. */
+export function tw(input: TailwindClassInput): TailwindClassValue {
+  return {
+    kind: "ink-tailwind",
+    classNames: normalizeTailwindClassInput(input),
+  };
+}
+
+/** Type guard for {@link TailwindClassValue}. */
+export function isTailwindClassValue(
+  value: unknown,
+): value is TailwindClassValue {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    (value as TailwindClassValue).kind === "ink-tailwind" &&
+    "classNames" in value &&
+    Array.isArray((value as TailwindClassValue).classNames) &&
+    (value as TailwindClassValue).classNames.every((entry) =>
+      typeof entry === "string"
+    )
+  );
+}
+
+/** Set the Tailwind merge implementation used by `tw(...)` class composition. */
+export function setTailwindMerge(
+  mergeFn: ((...classLists: string[]) => string) | undefined,
+): void {
+  tailwindMergeFn = mergeFn;
+  setTailwindMergeGlobal(mergeFn);
+}
+
+function resolveTailwindMerge(): (...classLists: string[]) => string {
+  if (tailwindMergeFn) {
+    return tailwindMergeFn;
+  }
+
+  if (tailwindMergeFn === null) {
+    throw new Error(
+      'tw() requires the optional dependency "tailwind-merge". Install it to use Tailwind class support.',
+    );
+  }
+
+  const injectedMerge = (
+    globalThis as Record<string, unknown>
+  )[TAILWIND_MERGE_GLOBAL_KEY];
+  if (typeof injectedMerge === "function") {
+    tailwindMergeFn = injectedMerge as (...classLists: string[]) => string;
+    return tailwindMergeFn;
+  }
+
+  const requireFn = getNodeRequire();
+  if (requireFn) {
+    try {
+      const loaded = requireFn("tailwind-merge") as
+        | { twMerge?: unknown; default?: { twMerge?: unknown } }
+        | null;
+      const mergeFn = typeof loaded?.twMerge === "function"
+        ? loaded.twMerge
+        : typeof loaded?.default?.twMerge === "function"
+        ? loaded.default.twMerge
+        : null;
+      if (mergeFn) {
+        tailwindMergeFn = mergeFn as (...classLists: string[]) => string;
+        return tailwindMergeFn;
+      }
+    } catch {
+      // Defer the user-facing error until after all sync loading strategies fail.
+    }
+  }
+
+  tailwindMergeFn = null;
+  throw new Error(
+    'tw() requires the optional dependency "tailwind-merge". Install it to use Tailwind class support.',
+  );
+}
+
+/** Merge Tailwind class lists using the optional `tailwind-merge` dependency. */
+export function mergeTailwindClassNames(
+  classLists: readonly string[],
+): string {
+  const normalized = classLists
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+  if (normalized.length === 0) {
+    return "";
+  }
+
+  return resolveTailwindMerge()(...normalized);
+}
+
+/** Convert a camelCased property name to kebab-case. */
+export function camelToKebab(value: string): string {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+}
+
+/** Create a short, deterministic hash for class name generation. */
+export function hashString(input: string): string {
+  let hash = 5381;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash * 33) ^ input.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+/**
+ * Build a stable class name from a style key and declaration.
+ * @param key Unique key for the style.
+ * @param declaration Style declaration to fingerprint.
+ * @param salt Optional salt to namespace class names.
+ */
+export function createClassName(
+  key: string,
+  declaration: StyleDeclaration,
+  salt = "",
+): string {
+  const fingerprint = JSON.stringify({ key, declaration, salt });
+  return `ink_${hashString(fingerprint).slice(0, 8)}`;
+}
+
+/**
+ * Convert a style property to a CSS declaration string.
+ * @param name Property name in camelCase.
+ * @param value Style value to serialize.
+ * @param options Optional serialization settings (breakpoints, containers, default unit).
+ */
+export function toCssDeclaration(
+  name: string,
+  value: StyleValue,
+  options?: CssSerializationOptions,
+): string {
+  const property = camelToKebab(name);
+  return `${property}:${formatStyleValue(property, value, options)}`;
+}
+
+const PSEUDO_ELEMENT_KEYS = new Set([
+  "before",
+  "after",
+  "firstLine",
+  "firstLetter",
+  "selection",
+  "placeholder",
+  "marker",
+  "backdrop",
+  "fileSelectorButton",
+]);
+
+const PSEUDO_CLASS_KEYS = new Set([
+  "active",
+  "checked",
+  "default",
+  "disabled",
+  "empty",
+  "enabled",
+  "first-child",
+  "first-of-type",
+  "focus",
+  "focus-visible",
+  "focus-within",
+  "has",
+  "hover",
+  "in-range",
+  "indeterminate",
+  "invalid",
+  "is",
+  "last-child",
+  "last-of-type",
+  "link",
+  "not",
+  "nth-child",
+  "nth-last-child",
+  "nth-last-of-type",
+  "nth-of-type",
+  "only-child",
+  "only-of-type",
+  "optional",
+  "out-of-range",
+  "placeholder-shown",
+  "read-only",
+  "read-write",
+  "required",
+  "root",
+  "target",
+  "valid",
+  "visited",
+  "where",
+]);
+
+function isNestedStyleDeclaration(
+  value: unknown,
+): value is NestedStyleDeclaration {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !isCssVarRef(value)
+  );
+}
+
+function toPseudoSelectorIfShorthand(key: string): string | null {
+  if (PSEUDO_ELEMENT_KEYS.has(key)) {
+    return `::${camelToKebab(key)}`;
+  }
+  const pseudoClass = camelToKebab(key);
+  if (PSEUDO_CLASS_KEYS.has(pseudoClass)) {
+    return `:${pseudoClass}`;
+  }
+  return null;
+}
+
+function toTailwindVariantFromPseudoSelector(selector: string): string | null {
+  const normalized = selector.trim().startsWith("&")
+    ? selector.trim().slice(1)
+    : selector.trim();
+
+  if (normalized.startsWith("::")) {
+    const variant = normalized.slice(2).trim();
+    return /^[A-Za-z-]+$/.test(variant) ? camelToKebab(variant) : null;
+  }
+
+  if (normalized.startsWith(":")) {
+    const variant = normalized.slice(1).trim();
+    return /^[A-Za-z-]+$/.test(variant) ? camelToKebab(variant) : null;
+  }
+
+  return null;
+}
+
+/** Map a nested selector key like `hover` or `&:focus-visible` to a Tailwind variant prefix. */
+export function toTailwindVariantForNestedKey(key: string): string | null {
+  const trimmed = key.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.startsWith("@") ||
+    trimmed.startsWith("$")
+  ) {
+    return null;
+  }
+
+  const pseudoSelector = toPseudoSelectorIfShorthand(trimmed);
+  if (pseudoSelector) {
+    return toTailwindVariantFromPseudoSelector(pseudoSelector);
+  }
+
+  return toTailwindVariantFromPseudoSelector(trimmed);
+}
+
+/** Prefix Tailwind class tokens with a variant like `hover:` or `before:`. */
+export function prefixTailwindVariantClasses(
+  classNames: readonly string[],
+  variant: string,
+): string[] {
+  return classNames
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) =>
+      entry.split(/\s+/).map((token) => `${variant}:${token}`).join(" ")
+    );
+}
+
+function toCssRule(
+  selector: string,
+  declaration: PseudoStyleDeclaration,
+  options?: CssSerializationOptions,
+): string {
+  const parts: string[] = [];
+  for (const [name, value] of Object.entries(declaration)) {
+    parts.push(toCssDeclaration(name, value, options));
+  }
+  return `${selector}{${parts.join(";")}}`;
+}
+
+function splitSelectors(value: string): string[] {
+  return value.split(",").map((part) => part.trim()).filter((part) =>
+    part.length > 0
+  );
+}
+
+function unwrapGlobalSelector(value: string): string {
+  return value.replace(/:global\(([^()]+)\)/g, "$1");
+}
+
+function extractScopeSelector(
+  key: string,
+  declaration: StyleDeclaration,
+): string | null {
+  if (key === "@scope") {
+    const selector = declaration.selector;
+    return typeof selector === "string" && selector.trim().length > 0
+      ? unwrapGlobalSelector(selector.trim())
+      : null;
+  }
+
+  const embeddedMatch = key.match(/^@scope\s*\((.+)\)$/);
+  if (!embeddedMatch || embeddedMatch[1].trim().length === 0) {
+    return null;
+  }
+
+  return unwrapGlobalSelector(embeddedMatch[1].trim());
+}
+
+function isScopeDirectiveDeclaration(
+  value: unknown,
+): value is StyleDeclaration {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    !isCssVarRef(value);
+}
+
+function nestSelector(parentSelector: string, childSelector: string): string {
+  const parents = splitSelectors(parentSelector);
+  const children = splitSelectors(childSelector);
+
+  if (childSelector.includes("&")) {
+    const expanded: string[] = [];
+    for (const parent of parents) {
+      for (const child of children) {
+        expanded.push(child.replace(/&/g, parent));
+      }
+    }
+    return expanded.join(", ");
+  }
+
+  const pseudoSelector =
+    childSelector.startsWith(":") || childSelector.startsWith("::")
+      ? childSelector
+      : toPseudoSelectorIfShorthand(childSelector);
+  if (pseudoSelector) {
+    return parents.map((parent) => `${parent}${pseudoSelector}`).join(", ");
+  }
+
+  const expanded: string[] = [];
+  for (const parent of parents) {
+    for (const child of children) {
+      expanded.push(`${parent} ${child}`);
+    }
+  }
+  return expanded.join(", ");
+}
+
+function wrapInAtRules(rule: string, atRules: readonly string[]): string {
+  let wrapped = rule;
+  for (let i = atRules.length - 1; i >= 0; i -= 1) {
+    wrapped = `${atRules[i]}{${wrapped}}`;
+  }
+  return wrapped;
+}
+
+function isSupportedAtRule(key: string): boolean {
+  return key.startsWith("@") || key.startsWith("!@") || key.startsWith("$");
+}
+
+function resolveAtRule(key: string, options?: CssSerializationOptions): string {
+  if (key.startsWith("$")) {
+    const scope = key.slice(1);
+    const selector = toThemeScopeSelector(scope);
+    return selector ? `@scope (${selector})` : `@scope (:root)`;
+  }
+
+  if (!(key.startsWith("@") || key.startsWith("!@"))) {
+    return key;
+  }
+
+  const reverseAliasMatch = key.match(/^!@([A-Za-z0-9_$-]+)$/);
+  if (reverseAliasMatch) {
+    const reverseBreakpoint = options?.breakpoints?.[reverseAliasMatch[1]];
+    if (reverseBreakpoint) {
+      return `@media (width <= ${reverseBreakpoint})`;
+    }
+    return key;
+  }
+
+  const rangeMatch = key.match(
+    /^@\(\s*([A-Za-z0-9_$-]+)\s*,\s*([A-Za-z0-9_$-]+)\s*\)$/,
+  );
+  if (rangeMatch) {
+    const lower = options?.breakpoints?.[rangeMatch[1]];
+    const upper = options?.breakpoints?.[rangeMatch[2]];
+    if (lower && upper) {
+      return `@media (${lower} < width < ${upper})`;
+    }
+
+    const lowerContainer = options?.containers?.[rangeMatch[1]];
+    const upperContainer = options?.containers?.[rangeMatch[2]];
+    if (lowerContainer?.rule && upperContainer?.rule) {
+      return `@container (${lowerContainer.rule}) and (${upperContainer.rule})`;
+    }
+
+    return key;
+  }
+
+  const aliasMatch = key.match(/^@([A-Za-z0-9_$-]+)$/);
+  if (!aliasMatch) {
+    return key;
+  }
+
+  const breakpoint = options?.breakpoints?.[aliasMatch[1]];
+  if (!breakpoint) {
+    const container = options?.containers?.[aliasMatch[1]];
+    if (container?.rule) {
+      return `@container ${aliasMatch[1]} (${container.rule})`;
+    }
+    return key;
+  }
+
+  return `@media (width >= ${breakpoint})`;
+}
+
+function collectCssRules(
+  selector: string,
+  declaration: StyleDeclaration,
+  atRules: readonly string[],
+  rules: string[],
+  options?: CssSerializationOptions,
+): void {
+  const base: PseudoStyleDeclaration = {};
+  const nested: Array<[string, NestedStyleDeclaration]> = [];
+
+  for (const [name, value] of Object.entries(declaration)) {
+    if (isNestedStyleDeclaration(value)) {
+      nested.push([name, value]);
+      continue;
+    }
+
+    if (isThemeStyleValue(value)) {
+      base[name] = value;
+    }
+  }
+
+  if (Object.keys(base).length > 0) {
+    rules.push(wrapInAtRules(toCssRule(selector, base, options), atRules));
+  }
+
+  for (const [name, value] of nested) {
+    if (isSupportedAtRule(name)) {
+      collectCssRules(
+        selector,
+        value,
+        [...atRules, resolveAtRule(name, options)],
+        rules,
+        options,
+      );
+      continue;
+    }
+
+    collectCssRules(
+      nestSelector(selector, name),
+      value,
+      atRules,
+      rules,
+      options,
+    );
+  }
+}
+
+/**
+ * Build CSS rules for a class name, including nested selectors and at-rules.
+ * @param className Class name without the leading dot.
+ * @param declaration Style declaration to serialize.
+ */
+export function toCssRules(
+  className: string,
+  declaration: StyleDeclaration,
+  options?: CssSerializationOptions,
+): string[] {
+  const rules: string[] = [];
+  collectCssRules(`.${className}`, declaration, [], rules, options);
+  return rules;
+}
+
+function collectGlobalCssRules(
+  selectorOrAtRule: string,
+  declaration: StyleDeclaration,
+  atRules: readonly string[],
+  rules: string[],
+  options?: CssSerializationOptions,
+): void {
+  const scopeSelector = extractScopeSelector(selectorOrAtRule, declaration);
+  if (scopeSelector !== null) {
+    const scopedRules: string[] = [];
+    for (const [name, value] of Object.entries(declaration)) {
+      if (
+        (selectorOrAtRule === "@scope" && name === "selector") ||
+        !isScopeDirectiveDeclaration(value)
+      ) {
+        continue;
+      }
+      collectGlobalCssRules(name, value, [], scopedRules, options);
+    }
+
+    rules.push(
+      wrapInAtRules(
+        `@scope (${scopeSelector}){${scopedRules.join("")}}`,
+        atRules,
+      ),
+    );
+    return;
+  }
+
+  if (isSupportedAtRule(selectorOrAtRule)) {
+    const nestedAtRules = [
+      ...atRules,
+      resolveAtRule(selectorOrAtRule, options),
+    ];
+    const nestedDeclarations: PseudoStyleDeclaration = {};
+
+    for (const [name, value] of Object.entries(declaration)) {
+      if (isNestedStyleDeclaration(value)) {
+        collectGlobalCssRules(name, value, nestedAtRules, rules, options);
+        continue;
+      }
+
+      if (isThemeStyleValue(value)) {
+        nestedDeclarations[name] = value;
+      }
+    }
+
+    if (Object.keys(nestedDeclarations).length > 0) {
+      rules.push(
+        wrapInAtRules(
+          toCssRule(selectorOrAtRule, nestedDeclarations, options),
+          atRules,
+        ),
+      );
+    }
+
+    return;
+  }
+
+  collectCssRules(
+    unwrapGlobalSelector(selectorOrAtRule),
+    declaration,
+    atRules,
+    rules,
+    options,
+  );
+}
+
+/**
+ * Build CSS rules for global selectors/at-rules without generating class names.
+ * @param styles Selector/at-rule map to serialize.
+ */
+export function toCssGlobalRules(
+  styles: StyleSheet,
+  options?: CssSerializationOptions,
+): string[] {
+  const rules: string[] = [];
+  for (const [selectorOrAtRule, declaration] of Object.entries(styles)) {
+    collectGlobalCssRules(selectorOrAtRule, declaration, [], rules, options);
+  }
+  return rules;
+}
+
+/** Convert configured layer names into a CSS layer order prelude. */
+export function toCssLayerOrderRule(
+  layers: readonly string[] | undefined,
+): string {
+  if (!layers || layers.length === 0) {
+    return "";
+  }
+
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const layer of layers) {
+    const trimmed = layer.trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+
+  if (normalized.length === 0) {
+    return "";
+  }
+
+  const statement = `@layer ${normalized.join(", ")};`;
+  // Keep empty layer blocks as a fallback because Vite/Svelte dev CSS inlining
+  // can drop bare layer-order statements during SSR style collection.
+  const fallbackBlocks = normalized.map((layer) => `@layer ${layer}{}`).join(
+    "",
+  );
+
+  return `${statement}${fallbackBlocks}`;
+}
+
+/** Convert `root`/`rootVars` inputs into global `:root` rules. */
+export function rootVarsToGlobalRules(
+  rootVars: readonly RootVarInput[] | undefined,
+): StyleSheet {
+  const globalRules: StyleSheet = {};
+  if (!rootVars) {
+    return globalRules;
+  }
+
+  for (const entry of rootVars) {
+    const vars = ("vars" in entry ? entry.vars : entry) as Record<
+      string,
+      StyleValue
+    >;
+    const layer = "layer" in entry && typeof entry.layer === "string" &&
+        entry.layer.trim().length > 0
+      ? entry.layer.trim()
+      : null;
+
+    if (layer) {
+      const layerKey = `@layer ${layer}`;
+      const layerRules =
+        (globalRules[layerKey] as StyleDeclaration | undefined) ?? {};
+      const rootDeclaration =
+        (layerRules[":root"] as Record<string, StyleValue> | undefined) ?? {};
+      layerRules[":root"] = { ...rootDeclaration, ...vars };
+      globalRules[layerKey] = layerRules;
+      continue;
+    }
+
+    const rootDeclaration =
+      (globalRules[":root"] as Record<string, StyleValue> | undefined) ?? {};
+    globalRules[":root"] = { ...rootDeclaration, ...vars };
+  }
+
+  return globalRules;
+}
+
+/**
+ * Create a CSS custom property reference for use in style objects.
+ * @param name CSS custom property name (must start with `--`).
+ * @param fallback Optional fallback value for the `var()` call.
+ */
+export function cVar(name: string, fallback?: PrimitiveStyleValue): CssVarRef {
+  if (!name.startsWith("--")) {
+    throw new Error(
+      `Expected a CSS variable name like "--token", got "${name}"`,
+    );
+  }
+
+  if (
+    fallback !== undefined && typeof fallback !== "string" &&
+    typeof fallback !== "number"
+  ) {
+    throw new Error("cVar() fallback must be a string or number");
+  }
+
+  return {
+    kind: "ink-var",
+    name,
+    fallback,
+  };
+}
+
+/**
+ * Type guard for {@link CssVarRef} values.
+ * @param value Unknown value to test.
+ */
+export function isCssVarRef(value: unknown): value is CssVarRef {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    (value as CssVarRef).kind === "ink-var"
+  );
+}
+
+function formatPrimitiveStyleValue(
+  property: string,
+  value: PrimitiveStyleValue,
+  options?: CssSerializationOptions,
+): string {
+  if (property === "content" && typeof value === "string") {
+    return formatContentValue(value);
+  }
+
+  if (typeof value === "string" && shouldAutoWrapImageValue(property, value)) {
+    return formatCssImageUrl(value);
+  }
+
+  if (typeof value === "number" && !UNITLESS_PROPERTIES.has(property)) {
+    return `${value}${options?.defaultUnit ?? "px"}`;
+  }
+  return String(value);
+}
+
+const RAW_CONTENT_KEYWORDS = new Set([
+  "none",
+  "normal",
+  "open-quote",
+  "close-quote",
+  "no-open-quote",
+  "no-close-quote",
+]);
+
+function isQuotedCssString(value: string): boolean {
+  return (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'")))
+  );
+}
+
+function isRawContentFunction(value: string): boolean {
+  return /^(attr|counter|counters|element|leader|target-counter|target-counters|target-text|string)\(/
+    .test(value);
+}
+
+function formatContentValue(value: string): string {
+  if (
+    isQuotedCssString(value) || RAW_CONTENT_KEYWORDS.has(value) ||
+    isRawContentFunction(value)
+  ) {
+    return value;
+  }
+
+  return JSON.stringify(value);
+}
+
+function isTransitionTimingToken(value: string): boolean {
+  return (
+    /^-?\d*\.?\d+m?s$/i.test(value) ||
+    value === "linear" ||
+    value === "step-start" ||
+    value === "step-end" ||
+    value.startsWith("ease") ||
+    value.startsWith("steps(") ||
+    value.startsWith("cubic-bezier(")
+  );
+}
+
+function shouldUseSpaceDelimitedTransitionValue(
+  value: readonly (PrimitiveStyleValue | CssVarRef)[],
+): boolean {
+  if (value.length < 2) {
+    return false;
+  }
+
+  let hasTimingToken = false;
+  for (const entry of value) {
+    if (typeof entry === "number") {
+      return false;
+    }
+
+    if (isCssVarRef(entry)) {
+      hasTimingToken = true;
+      continue;
+    }
+
+    if (/\s|,/.test(entry)) {
+      return false;
+    }
+
+    if (isTransitionTimingToken(entry)) {
+      hasTimingToken = true;
+    }
+  }
+
+  return hasTimingToken;
+}
+
+function formatStyleValue(
+  property: string,
+  value: StyleValue,
+  options?: CssSerializationOptions,
+): string {
+  if (Array.isArray(value)) {
+    if (
+      property === "transition" && shouldUseSpaceDelimitedTransitionValue(value)
+    ) {
+      return value.map((entry) => formatStyleValue(property, entry, options))
+        .join(" ");
+    }
+    const separator = COMMA_DELIMITED_PROPERTIES.has(property) ? ", " : " ";
+    return value.map((entry) => formatStyleValue(property, entry, options))
+      .join(separator);
+  }
+
+  if (isCssVarRef(value)) {
+    if (value.fallback === undefined) {
+      return `var(${value.name})`;
+    }
+    return `var(${value.name}, ${
+      formatPrimitiveStyleValue(property, value.fallback, options)
+    })`;
+  }
+
+  return formatPrimitiveStyleValue(
+    property,
+    value as PrimitiveStyleValue,
+    options,
+  );
+}
