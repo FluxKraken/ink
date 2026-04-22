@@ -2,7 +2,9 @@ import {
   cVar,
   evalThemeTemplate,
   font,
+  fontsToConfig,
   isCssVarRef,
+  isFontTokenProperty,
   isTailwindClassValue,
   isTheme,
   prefixTailwindVariantClasses,
@@ -12,6 +14,7 @@ import {
   type TailwindClassValue,
   Theme,
   type ThemeMode,
+  toFontVarName,
   toTailwindVariantForNestedKey,
   toThemeVarName,
   tw,
@@ -862,10 +865,30 @@ function identifierReferenceToThemeVar(
   return cVar(toThemeVarName(token));
 }
 
+function identifierReferenceToFontVar(
+  value: unknown,
+): ReturnType<typeof cVar> | null {
+  if (!isIdentifierReference(value) || value.path.length !== 2) {
+    return null;
+  }
+
+  const [head, token] = value.path;
+  if (head !== "font" || token.length === 0 || !isFontTokenProperty(token)) {
+    return null;
+  }
+
+  return cVar(toFontVarName(token));
+}
+
 function normalizeStyleLeafValue(value: unknown): StyleValue | null {
   const themeVar = identifierReferenceToThemeVar(value);
   if (themeVar) {
     return themeVar;
+  }
+
+  const fontVar = identifierReferenceToFontVar(value);
+  if (fontVar) {
+    return fontVar;
   }
 
   const cssIdentifierLiteral = identifierReferenceToCssLiteral(value);
@@ -904,7 +927,8 @@ function isPrimitiveStyleLeaf(value: unknown): boolean {
     typeof value === "number" ||
     isCssVarRef(value) ||
     identifierReferenceToCssLiteral(value) !== null ||
-    identifierReferenceToThemeVar(value) !== null
+    identifierReferenceToThemeVar(value) !== null ||
+    identifierReferenceToFontVar(value) !== null
   );
 }
 
@@ -1349,6 +1373,22 @@ function normalizeRootVars(
   return normalized;
 }
 
+function normalizeFonts(
+  value: unknown,
+): {
+  imports: string[];
+  root: RootVarEntry[];
+} | null {
+  try {
+    const config = fontsToConfig(
+      value as Parameters<typeof fontsToConfig>[0],
+    );
+    return { imports: config.imports, root: config.root as RootVarEntry[] };
+  } catch {
+    return null;
+  }
+}
+
 function toThemeScopeSelector(scope: string): string | null {
   const trimmed = scope.trim();
   if (
@@ -1644,8 +1684,8 @@ function normalizeVariantSelection(
 
 /**
  * Validate and normalize a parsed config object into a {@link InkConfig}.
- * Allowed top-level keys: `simple`, `global`, `themes`, `root`, `rootVars`,
- * `base`, `variant`, `defaults`.
+ * Allowed top-level keys: `simple`, `global`, `themes`, `fonts`, `root`,
+ * `rootVars`, `base`, `variant`, `defaults`.
  * Returns `null` when the input cannot be validated.
  */
 export function parseInkConfig(
@@ -1656,6 +1696,7 @@ export function parseInkConfig(
     "simple",
     "global",
     "themes",
+    "fonts",
     "root",
     "rootVars",
     "base",
@@ -1699,6 +1740,17 @@ export function parseInkConfig(
     if (Object.keys(normalizedThemes.global).length > 0) {
       global = normalizedThemes.global;
     }
+  }
+
+  if ("fonts" in value) {
+    const normalizedFonts = normalizeFonts(value.fonts);
+    if (!normalizedFonts) {
+      return null;
+    }
+    for (const importPath of normalizedFonts.imports) {
+      imports.add(importPath);
+    }
+    rootEntries.push(...normalizedFonts.root);
   }
 
   if ("global" in value) {
@@ -2372,7 +2424,7 @@ export function findNewInkDeclarations(code: string): NewInkDeclaration[] {
 
     const assignments: NewInkAssignment[] = [];
     const assignmentMatcher = new RegExp(
-      `\\b${varName}\\.(base|global|themes|root|rootVars|variant|defaults)\\s*=\\s*`,
+      `\\b${varName}\\.(base|global|themes|fonts|root|rootVars|variant|defaults)\\s*=\\s*`,
       "g",
     );
     assignmentMatcher.lastIndex = declEnd;

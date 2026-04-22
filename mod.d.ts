@@ -3,6 +3,8 @@ import {
   ContainerSetInput,
   CssVarRef,
   font,
+  FontHelper,
+  FontSourceInput,
   ImportedThemesInput,
   LayeredApplyInput,
   PrimitiveStyleValue,
@@ -50,6 +52,7 @@ type InkConfig<
 > = {
   global?: StyleSheetInput;
   themes?: ImportedThemesInput;
+  fonts?: readonly FontSourceInput[];
   root?: readonly RootVarInput[];
   /** @deprecated Use `root` instead. */
   rootVars?: readonly RootVarInput[];
@@ -66,6 +69,7 @@ type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   simple: true;
   global?: StyleSheetInput;
   themes?: ImportedThemesInput;
+  fonts?: readonly FontSourceInput[];
   root?: readonly RootVarInput[];
   /** @deprecated Use `root` instead. */
   rootVars?: readonly RootVarInput[];
@@ -126,6 +130,7 @@ type InkBuilder<
     base: T | undefined;
     global: StyleSheetInput | undefined;
     themes: ImportedThemesInput | undefined;
+    fonts: readonly FontSourceInput[] | undefined;
     root: readonly RootVarInput[] | undefined;
     /** @deprecated Use `root` instead. */
     rootVars: readonly RootVarInput[] | undefined;
@@ -148,6 +153,7 @@ type InkSimpleBuilder<V extends SimpleVariantSheet | undefined> =
     base: StyleDeclarationInput | undefined;
     global: StyleSheetInput | undefined;
     themes: ImportedThemesInput | undefined;
+    fonts: readonly FontSourceInput[] | undefined;
     root: readonly RootVarInput[] | undefined;
     /** @deprecated Use `root` instead. */
     rootVars: readonly RootVarInput[] | undefined;
@@ -183,6 +189,10 @@ export type { InkSimpleStyleAccessor };
 export type { StyleSheet };
 /** Re-exported style value type. */
 export type { StyleValue };
+/** Fontsource font entry accepted by `fonts`. */
+export type { FontSourceInput };
+/** Callable font helper type. */
+export type { FontHelper };
 /** Input accepted by the `@apply` directive. */
 export type { ApplyInput };
 /** Input accepted by the `@set` directive. */
@@ -228,7 +238,7 @@ export interface Ink {
   vite: (options?: InkVitePluginOptions) => any;
   /** Create a CSS variable reference. */
   cVar: (name: string, fallback?: PrimitiveStyleValue) => CssVarRef;
-  /** Create a quoted `font-family` list. */
+  /** Create a quoted `font-family` list or read font tokens. */
   font: typeof font;
   /** Theme constructor. */
   Theme: typeof Theme;
@@ -247,7 +257,7 @@ export const inkVite: (options?: InkVitePluginOptions) => any;
 export const vite: (options?: InkVitePluginOptions) => any;
 /** Named export for creating CSS variable references. */
 export const cVar: (name: string, fallback?: PrimitiveStyleValue) => CssVarRef;
-/** Named export for creating quoted `font-family` lists. */
+/** Named export for creating quoted `font-family` lists and reading font tokens. */
 export { font };
 /** Named export for defining theme token maps. */
 export { Theme };

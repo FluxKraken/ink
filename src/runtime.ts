@@ -1,6 +1,8 @@
 import {
   createClassName,
   CssSerializationOptions,
+  FontSourceInput,
+  fontsToConfig,
   ImportedThemesInput,
   isCssVarRef,
   isTailwindClassValue,
@@ -78,6 +80,8 @@ type InkConfig<
   global?: StyleSheetInput;
   /** Theme definitions expanded into root vars and scoped global rules. */
   themes?: ImportedThemesInput;
+  /** Fontsource fonts expanded into package imports and `--font-*` variables. */
+  fonts?: readonly FontSourceInput[];
   /** CSS custom properties to emit on `:root` (optionally under a layer). */
   root?: readonly RootVarInput[];
   /** CSS custom properties to emit on `:root` (optionally under a layer). */
@@ -98,6 +102,8 @@ type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   global?: StyleSheetInput;
   /** Theme definitions expanded into root vars and scoped global rules. */
   themes?: ImportedThemesInput;
+  /** Fontsource fonts expanded into package imports and `--font-*` variables. */
+  fonts?: readonly FontSourceInput[];
   /** CSS custom properties to emit on `:root` (optionally under a layer). */
   root?: readonly RootVarInput[];
   /** CSS custom properties to emit on `:root` (optionally under a layer). */
@@ -973,8 +979,13 @@ function compileAccessorFactory<
     config.themes,
     runtimeOptions.themeMode,
   );
+  const importedFonts = fontsToConfig(config.fonts);
+  for (const importPath of importedFonts.imports) {
+    imports.add(importPath);
+  }
   const rootVarStyles = rootVarsToGlobalRules([
     ...importedThemes.root,
+    ...importedFonts.root,
     ...(config.root ?? config.rootVars ?? []),
   ]);
   const mergedGlobalStyles = {
@@ -1338,6 +1349,7 @@ function compileSimpleConfig<V extends SimpleVariantSheet | undefined>(
   > = {
     global: config.global,
     themes: config.themes,
+    fonts: config.fonts,
     root: config.root,
     rootVars: config.rootVars,
     base: wrapSimpleBaseInput(config.base),
@@ -1393,6 +1405,7 @@ const CONFIG_KEYS = new Set([
   "base",
   "global",
   "themes",
+  "fonts",
   "root",
   "rootVars",
   "variant",
@@ -1426,6 +1439,8 @@ type InkBuilder<
   global: StyleSheetInput | undefined;
   /** Theme definitions expanded into root vars and scoped global rules. */
   themes: ImportedThemesInput | undefined;
+  /** Fontsource fonts expanded into package imports and `--font-*` variables. */
+  fonts: readonly FontSourceInput[] | undefined;
   /** CSS custom properties to emit on `:root` (optionally under a layer). */
   root: readonly RootVarInput[] | undefined;
   /** @deprecated Use `root` instead. */
@@ -1449,6 +1464,8 @@ type InkSimpleBuilder<
   global: StyleSheetInput | undefined;
   /** Theme definitions expanded into root vars and scoped global rules. */
   themes: ImportedThemesInput | undefined;
+  /** Fontsource fonts expanded into package imports and `--font-*` variables. */
+  fonts: readonly FontSourceInput[] | undefined;
   /** CSS custom properties to emit on `:root` (optionally under a layer). */
   root: readonly RootVarInput[] | undefined;
   /** @deprecated Use `root` instead. */

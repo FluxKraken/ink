@@ -607,6 +607,7 @@ Deno.test("font() formats quoted font-family lists for declarations and themes",
     font(["Inter Variable", "system-ui", "sans-serif"]),
     `"Inter Variable", system-ui, sans-serif`,
   );
+  assertEquals(font.display, cVar("--font-display"));
   assertEquals(
     toCssDeclaration(
       "fontFamily",
@@ -623,6 +624,27 @@ Deno.test("font() formats quoted font-family lists for declarations and themes",
       ":root": theme.vars,
     }),
     [`:root{--font-display:"Inter Variable", system-ui, sans-serif}`],
+  );
+});
+
+Deno.test("parser supports Fontsource fonts and font token references", () => {
+  const parsed = parseInkCallArguments(`{
+    fonts: [
+      { name: "Bungee", varName: "display" }
+    ],
+    base: {
+      header: {
+        fontFamily: font.display
+      }
+    }
+  }`);
+
+  assert(parsed !== null);
+  assertEquals(parsed.imports, [`"@fontsource/bungee"`]);
+  assertEquals(parsed.root, [{ "--font-display": "Bungee, system-ui" }]);
+  assertEquals(
+    styleDeclarationOf(parsed.base.header).fontFamily,
+    cVar("--font-display"),
   );
 });
 
@@ -1289,6 +1311,24 @@ Deno.test("type checking accepts boolean variant selections in route-like module
   });
 });
 
+Deno.test("type checking accepts Fontsource fonts and font token accessors", () => {
+  assertTypeCheckSucceeds({
+    "src/app.ts": `
+      import ink, { font } from "@kraken/ink";
+
+      const styles = new ink();
+      styles.fonts = [{ name: "Bungee", varName: "display" }];
+      styles.base = {
+        header: {
+          fontFamily: font.display,
+        },
+      };
+
+      styles.header();
+    `,
+  });
+});
+
 Deno.test("type checking accepts ThemeProvider and useTheme from the react entrypoint", () => {
   const runtimeSpecifier = toFileUrl(join(Deno.cwd(), "src", "index.ts"))
     .href;
@@ -1584,6 +1624,64 @@ Deno.test("runtime injects root into :root and layered :root", () => {
     const text = styleTag?.textContent ?? "";
     assert(text.includes(":root{--background:#111}"));
     assert(text.includes("@layer theme{:root{--accent:deepskyblue}}"));
+  } finally {
+    globals.document = originalDocument;
+  }
+});
+
+Deno.test("runtime injects Fontsource imports and font root variables", () => {
+  type FakeStyleTag = {
+    id: string;
+    textContent: string;
+    appendChild: (node: unknown) => void;
+  };
+
+  const globals = globalThis as Record<string, unknown>;
+  const originalDocument = globals.document;
+  const tags = new Map<string, FakeStyleTag>();
+  const fakeDocument = {
+    getElementById(id: string) {
+      return tags.get(id) ?? null;
+    },
+    createElement(_tag: "style"): FakeStyleTag {
+      return {
+        id: "",
+        textContent: "",
+        appendChild(node: unknown) {
+          this.textContent += String(node);
+        },
+      };
+    },
+    createTextNode(text: string) {
+      return text;
+    },
+    head: {
+      appendChild(node: unknown) {
+        const tag = node as FakeStyleTag;
+        tags.set(tag.id, tag);
+      },
+    },
+  };
+
+  globals.document = fakeDocument;
+
+  try {
+    const styles = ink({
+      fonts: [{ name: "Bungee", varName: "display" }],
+      base: {
+        header: {
+          fontFamily: font.display,
+        },
+      },
+    });
+
+    styles().header();
+    const importTag = fakeDocument.getElementById("__ink_runtime_imports");
+    const styleTag = fakeDocument.getElementById("__ink_runtime_styles");
+    assertEquals(importTag?.textContent, '@import "@fontsource/bungee";');
+    const text = styleTag?.textContent ?? "";
+    assert(text.includes(":root{--font-display:Bungee, system-ui}"));
+    assertMatch(text, /\.ink_[a-z0-9]+\{font-family:var\(--font-display\)\}/);
   } finally {
     globals.document = originalDocument;
   }
@@ -2374,6 +2472,38 @@ Deno.test("extracts @import stylesheet imports with relative paths", () => {
   }
 });
 
+Deno.test("extracts Fontsource fonts from ink config", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink, { font } from "@kraken/ink";\n` +
+      `export const styles = ink({\n` +
+      `  fonts: [{ name: "Bungee", varName: "display" }],\n` +
+      `  base: {\n` +
+      `    header: { fontFamily: font.display },\n` +
+      `  },\n` +
+      `});`;
+    const transformed = transform(moduleCode, `${root}/src/app.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes('@import "@fontsource/bungee";'));
+    assert(css.includes(":root{--font-display:Bungee, system-ui}"));
+    assertMatch(css, /\.ink_[a-z0-9]+\{font-family:var\(--font-display\)\}/);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("extracts @import stylesheet imports with aliased paths", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
@@ -3139,6 +3269,45 @@ Deno.test("loads ink.config.ts themes into the shared stylesheet", () => {
       css,
       /\.ink_[a-z0-9]+\{background-color:var\(--header-bg\)\}/,
     );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("loads ink.config.ts Fontsource fonts into the shared stylesheet", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default {\n` +
+        `  fonts: [{ name: "Bungee", varName: "display" }],\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink, { font } from "@kraken/ink";\n` +
+      `export const styles = ink({\n` +
+      `  base: {\n` +
+      `    header: { fontFamily: font.display },\n` +
+      `  },\n` +
+      `});`;
+    const transformed = transform(moduleCode, `${root}/src/app.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes('@import "@fontsource/bungee";'));
+    assert(css.includes(":root{--font-display:Bungee, system-ui}"));
+    assertMatch(css, /\.ink_[a-z0-9]+\{font-family:var\(--font-display\)\}/);
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -5130,6 +5299,30 @@ Deno.test("vite extracts css from new ink() pattern", () => {
 
   const css = load(VIRTUAL_ID) as string;
   assertMatch(css, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
+});
+
+Deno.test("vite extracts Fontsource fonts from new ink() assignments", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const moduleCode = `import ink, { font } from "@kraken/ink";\n` +
+    `const styles = new ink();\n` +
+    `styles.fonts = [{ name: "Bungee", varName: "display" }];\n` +
+    `styles.base = { header: { fontFamily: font.display } };\n`;
+  const transformed = transform(moduleCode, "/app/src/lib/new-ink-fonts.ts");
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const code = transformed.code as string;
+  assert(!code.includes("new ink()"));
+  assert(!code.includes("styles.fonts ="));
+
+  const css = load(VIRTUAL_ID) as string;
+  assert(css.includes('@import "@fontsource/bungee";'));
+  assert(css.includes(":root{--font-display:Bungee, system-ui}"));
+  assertMatch(css, /\.ink_[a-z0-9]+\{font-family:var\(--font-display\)\}/);
 });
 
 Deno.test("vite extracts css from new ink({ simple: true }) pattern", () => {

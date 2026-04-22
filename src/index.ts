@@ -66,6 +66,10 @@ export type { StyleDeclaration } from "./shared.js";
 export type { StyleSheet } from "./shared.js";
 /** CSS value accepted by style declarations. */
 export type { StyleValue } from "./shared.js";
+/** Fontsource font entry accepted by `fonts`. */
+export type { FontSourceInput } from "./shared.js";
+/** Callable font helper type. */
+export type { FontHelper } from "./shared.js";
 /** Input accepted by the `@apply` directive. */
 export type { ApplyInput } from "./shared.js";
 /** Input accepted by the `@set` directive. */

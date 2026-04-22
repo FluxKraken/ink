@@ -14,6 +14,7 @@ import {
   createClassName,
   cVar,
   font,
+  fontsToConfig,
   isCssVarRef,
   mergeTailwindClassNames,
   rootVarsToGlobalRules,
@@ -2032,6 +2033,14 @@ function loadInkConfig(
   const containers = normalizeContainers(configObject.containers);
   const layers = normalizeLayers(configObject.layers);
   const defaultUnit = normalizeDefaultUnit(configObject.defaultUnit);
+  const configFonts = Object.prototype.hasOwnProperty.call(
+      configObject,
+      "fonts",
+    )
+    ? fontsToConfig(
+      configObject.fonts as Parameters<typeof fontsToConfig>[0],
+    )
+    : { imports: [], root: [] };
 
   const parsedThemes = Object.prototype.hasOwnProperty.call(
       configObject,
@@ -2048,7 +2057,12 @@ function loadInkConfig(
   const utilityImports = parsedUtilities?.imports ?? [];
 
   const dedupedRawImports = Array.from(
-    new Set([...sideEffectImports, ...importsFromObject, ...utilityImports]),
+    new Set([
+      ...sideEffectImports,
+      ...importsFromObject,
+      ...utilityImports,
+      ...configFonts.imports,
+    ]),
   );
   const resolvedImports = dedupedRawImports
     .map((importPath) =>
@@ -2063,18 +2077,19 @@ function loadInkConfig(
   const allImports = Array.from(new Set(resolvedImports));
 
   const include = normalizeIncludePaths(configObject.include, configDir);
-  const themeRules = parsedThemes
-    ? toCssGlobalRules(
-      {
-        ...rootVarsToGlobalRules(parsedThemes.root ?? parsedThemes.rootVars),
-        ...(parsedThemes.global ?? {}),
-      },
-      {
-        breakpoints,
-        containers,
-        defaultUnit,
-      },
-    )
+  const configGlobalRules = {
+    ...rootVarsToGlobalRules([
+      ...(parsedThemes?.root ?? parsedThemes?.rootVars ?? []),
+      ...configFonts.root,
+    ]),
+    ...(parsedThemes?.global ?? {}),
+  };
+  const themeRules = Object.keys(configGlobalRules).length > 0
+    ? toCssGlobalRules(configGlobalRules, {
+      breakpoints,
+      containers,
+      defaultUnit,
+    })
     : [];
   const layerOrderRule = toCssLayerOrderRule(layers);
   const configCss = [layerOrderRule, ...themeRules].filter((part) =>
@@ -2160,6 +2175,7 @@ const CT_BUILDER_ASSIGNMENT_PROPERTIES = new Set([
   "base",
   "global",
   "themes",
+  "fonts",
   "root",
   "rootVars",
   "variant",
@@ -4881,6 +4897,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               assignment.property === "base" ||
               assignment.property === "global" ||
               assignment.property === "themes" ||
+              assignment.property === "fonts" ||
               assignment.property === "root" ||
               assignment.property === "rootVars" ||
               assignment.property === "variant" ||
@@ -4936,7 +4953,8 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                 ) {
                   configParts.root = parsedRoot;
                 } else if (
-                  assignment.property === "themes" &&
+                  (assignment.property === "themes" ||
+                    assignment.property === "fonts") &&
                   parsedRoot
                 ) {
                   configParts.root = [

@@ -110,6 +110,35 @@ export type ThemeMode = "scope" | "color-scheme";
 export type ThemeInput = Theme | ThemeTokenInput;
 /** Map of imported theme names/selectors to theme definitions. */
 export type ImportedThemesInput = Record<string, ThemeInput>;
+/** Fontsource package entry accepted by `fonts`. */
+export interface FontSourceInput {
+  /** CSS font-family name, for example `"Bungee"`. */
+  name: string;
+  /** Token name used by `font.<token>`, for example `"display"`. */
+  varName: string;
+  /** Fallback font families appended to the CSS variable value. */
+  fallback?: string | readonly string[];
+  /** Override the Fontsource import specifier. Defaults to `@fontsource/<slug>`. */
+  package?: string;
+}
+/** Normalized Fontsource entry used internally. */
+export interface ResolvedFontSource {
+  /** CSS font-family name. */
+  name: string;
+  /** CSS custom property name emitted for this font. */
+  variableName: string;
+  /** Quoted `@import` specifier consumed by the runtime/Vite CSS pipeline. */
+  importPath: string;
+  /** CSS-safe `font-family` list assigned to the custom property. */
+  family: string;
+}
+/** Callable font-family helper with token accessors like `font.display`. */
+export type FontHelper =
+  & ((families: readonly string[]) => string)
+  & {
+    /** Read a configured font token as a CSS variable reference. */
+    readonly [token: string]: CssVarRef;
+  };
 /** Flat style object with only CSS declarations. */
 export type PseudoStyleDeclaration = Record<string, StyleValue>;
 /** Recursive style object supporting nested selectors and at-rules. */
@@ -499,8 +528,7 @@ function formatFontFamily(value: string): string {
   return shouldQuoteFontFamily(trimmed) ? JSON.stringify(trimmed) : trimmed;
 }
 
-/** Create a CSS-safe `font-family` list from font names. */
-export function font(families: readonly string[]): string {
+function formatFontFamilies(families: readonly string[]): string {
   if (!Array.isArray(families)) {
     throw new Error("font() expects an array of font family names.");
   }
@@ -516,6 +544,149 @@ export function font(families: readonly string[]): string {
     return formatFontFamily(family);
   }).join(", ");
 }
+
+const FONT_HELPER_RESERVED_PROPERTIES = new Set([
+  "apply",
+  "arguments",
+  "bind",
+  "call",
+  "caller",
+  "constructor",
+  "length",
+  "name",
+  "prototype",
+  "toString",
+  "valueOf",
+]);
+
+/** Whether a property name can be used as a `font.<token>` accessor. */
+export function isFontTokenProperty(prop: string): boolean {
+  return prop !== "then" && !FONT_HELPER_RESERVED_PROPERTIES.has(prop);
+}
+
+/** Convert a font token like `display` to a CSS custom property name. */
+export function toFontVarName(token: string): string {
+  const trimmed = token.trim();
+  if (trimmed.length === 0) {
+    throw new Error("Font token names must not be empty.");
+  }
+
+  if (trimmed.startsWith("--")) {
+    return trimmed;
+  }
+
+  const kebab = camelToKebab(trimmed);
+  return kebab.startsWith("font-") ? `--${kebab}` : `--font-${kebab}`;
+}
+
+/** Create a Fontsource package slug from a CSS font-family name. */
+export function fontSourceSlug(name: string): string {
+  const slug = name.trim().toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (slug.length === 0) {
+    throw new Error("Fontsource font names must produce a non-empty slug.");
+  }
+  return slug;
+}
+
+function normalizeFontFallback(value: FontSourceInput["fallback"]): string[] {
+  if (value === undefined) {
+    return ["system-ui"];
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? [trimmed] : [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(
+      "Fontsource font fallback must be a string or string array.",
+    );
+  }
+
+  return value.map((entry) => {
+    if (typeof entry !== "string") {
+      throw new Error("Fontsource font fallback entries must be strings.");
+    }
+    return entry.trim();
+  }).filter((entry) => entry.length > 0);
+}
+
+/** Normalize `fonts` into CSS imports and root variable definitions. */
+export function fontsToConfig(
+  fonts: readonly FontSourceInput[] | undefined,
+): {
+  imports: string[];
+  root: RootVarInput[];
+  resolved: ResolvedFontSource[];
+} {
+  if (!fonts) {
+    return { imports: [], root: [], resolved: [] };
+  }
+
+  if (!Array.isArray(fonts)) {
+    throw new Error("fonts expects an array of Fontsource font entries.");
+  }
+
+  const imports: string[] = [];
+  const root: RootVarInput[] = [];
+  const resolved: ResolvedFontSource[] = [];
+
+  for (const entry of fonts) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("fonts entries must be objects.");
+    }
+    if (typeof entry.name !== "string" || entry.name.trim().length === 0) {
+      throw new Error("fonts entries require a non-empty name.");
+    }
+    if (
+      typeof entry.varName !== "string" || entry.varName.trim().length === 0
+    ) {
+      throw new Error("fonts entries require a non-empty varName.");
+    }
+
+    const name = entry.name.trim();
+    const variableName = toFontVarName(entry.varName);
+    const packagePath =
+      typeof entry.package === "string" && entry.package.trim().length > 0
+        ? entry.package.trim()
+        : `@fontsource/${fontSourceSlug(name)}`;
+    const family = formatFontFamilies([
+      name,
+      ...normalizeFontFallback(
+        entry.fallback,
+      ),
+    ]);
+    const importPath = JSON.stringify(packagePath);
+
+    imports.push(importPath);
+    root.push({ [variableName]: family });
+    resolved.push({ name, variableName, importPath, family });
+  }
+
+  return {
+    imports: Array.from(new Set(imports)),
+    root,
+    resolved,
+  };
+}
+
+/** Create a CSS-safe `font-family` list or read configured font tokens. */
+export const font = new Proxy(formatFontFamilies, {
+  get(target, prop, receiver) {
+    if (prop === "then") {
+      return undefined;
+    }
+    if (typeof prop !== "string" || !isFontTokenProperty(prop)) {
+      return Reflect.get(target, prop, receiver);
+    }
+    return cVar(toFontVarName(prop));
+  },
+}) as FontHelper;
 
 function getBuiltinModule(id: string): unknown | null {
   const processValue = (globalThis as { process?: unknown }).process;
