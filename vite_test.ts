@@ -107,6 +107,74 @@ function assertTypeCheckSucceeds(files: Record<string, string>): void {
   }
 }
 
+function assertPackageTypesSucceed(source: string): void {
+  const tempDir = Deno.makeTempDirSync();
+  const repoRoot = Deno.cwd();
+  const packageRoot = join(tempDir, "node_modules", "@kraken", "ink");
+
+  try {
+    Deno.mkdirSync(join(packageRoot, "dist"), { recursive: true });
+    Deno.writeTextFileSync(
+      join(packageRoot, "package.json"),
+      JSON.stringify({
+        name: "@kraken/ink",
+        type: "module",
+        types: "./mod.d.ts",
+        exports: {
+          ".": {
+            types: "./mod.d.ts",
+          },
+        },
+      }),
+    );
+
+    for (const file of ["mod.d.ts", "dist/shared.d.ts", "dist/vite.d.ts"]) {
+      const sourcePath = join(repoRoot, file);
+      const targetPath = join(packageRoot, file);
+      Deno.mkdirSync(dirname(targetPath), { recursive: true });
+      Deno.copyFileSync(sourcePath, targetPath);
+    }
+
+    Deno.writeTextFileSync(join(tempDir, "app.ts"), source);
+    Deno.writeTextFileSync(
+      join(tempDir, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          strict: true,
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          target: "ES2020",
+          skipLibCheck: true,
+        },
+      }),
+    );
+
+    const output = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--node-modules-dir=auto",
+        "-A",
+        "npm:typescript/bin/tsc",
+        "-p",
+        "tsconfig.json",
+        "--noEmit",
+      ],
+      cwd: tempDir,
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+
+    assert(
+      output.success,
+      `Expected package type check to succeed.\nstdout:\n${
+        new TextDecoder().decode(output.stdout)
+      }\nstderr:\n${new TextDecoder().decode(output.stderr)}`,
+    );
+  } finally {
+    Deno.removeSync(tempDir, { recursive: true });
+  }
+}
+
 Deno.test("injects component CSS for direct ink usage in svelte", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
@@ -1327,6 +1395,22 @@ Deno.test("type checking accepts Fontsource fonts and font token accessors", () 
       styles.header();
     `,
   });
+});
+
+Deno.test("published types accept new ink() Fontsource font assignments", () => {
+  assertPackageTypesSucceed(`
+    import ink, { font } from "@kraken/ink";
+
+    const styles = new ink();
+    styles.fonts = [{ name: "Bungee", varName: "display" }];
+    styles.base = {
+      header: {
+        fontFamily: font.display,
+      },
+    };
+
+    styles.header();
+  `);
 });
 
 Deno.test("type checking accepts ThemeProvider and useTheme from the react entrypoint", () => {

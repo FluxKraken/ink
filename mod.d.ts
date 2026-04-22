@@ -102,9 +102,10 @@ type VariantSelection<V extends VariantSheet<any> | undefined> = V extends
 type Accessor<
   T extends StyleSheetInput,
   V extends VariantSheet<T> | undefined,
-> = {
-  [K in keyof T]: StyleAccessor<V>;
-};
+> = string extends keyof T ? Record<string, any>
+  : {
+    [K in keyof T]: StyleAccessor<V>;
+  };
 type StyleAccessor<V extends VariantSheet<any> | undefined> =
   & ((variants?: VariantSelection<V>) => string)
   & {

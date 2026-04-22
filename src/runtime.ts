@@ -159,9 +159,10 @@ type ContainerDefinitionInput = {
 type Accessor<
   T extends StyleSheetInput,
   V extends VariantSheet<T> | undefined,
-> = {
-  [K in keyof T]: StyleAccessor<V>;
-};
+> = string extends keyof T ? Record<string, any>
+  : {
+    [K in keyof T]: StyleAccessor<V>;
+  };
 type InkSimpleStyleAccessor<V extends SimpleVariantSheet | undefined> =
   & ((variants?: SimpleVariantSelection<V>) => string)
   & {
@@ -1099,7 +1100,7 @@ function compileAccessorFactory<
   }
   setManagedRules(managedTagIds.variantGlobal, variantGlobalRules);
 
-  const accessors = {} as Accessor<T, V>;
+  const accessors: Record<PropertyKey, unknown> = {};
   const variantClassMap: VariantClassMap<T> = {};
   const compiledBase = effectiveCompiled?.base;
 
@@ -1229,7 +1230,7 @@ function compileAccessorFactory<
         ...resolveVariantDeclarations(selection),
       ], cssOptions);
 
-    accessors[key] = accessor as Accessor<T, V>[keyof T];
+    accessors[key] = accessor;
   }
 
   if (variants) {
