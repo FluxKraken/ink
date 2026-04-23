@@ -578,12 +578,7 @@ function toJsrNpmPackageName(packageName: string): string | null {
 }
 
 const INK_PACKAGE_NPM_NAME = toJsrNpmPackageName(INK_PACKAGE_NAME);
-const INK_PACKAGE_VERSION = resolveInkPackageVersion();
-const INK_NPM_SHIM_SPECIFIER = INK_PACKAGE_NPM_NAME
-  ? `npm:${INK_PACKAGE_NPM_NAME}${
-    INK_PACKAGE_VERSION ? `@${INK_PACKAGE_VERSION}` : ""
-  }`
-  : null;
+const INK_RUNTIME_SPECIFIER = INK_PACKAGE_NPM_NAME;
 let inkEntryFiles: Set<string> | null = null;
 let staticInkDefaultExport: Record<string, unknown> | null = null;
 
@@ -593,63 +588,6 @@ function fileUrlToPath(urlValue: URL): string {
     filePath = filePath.slice(1);
   }
   return filePath;
-}
-
-function normalizePackageVersion(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const normalized = value.trim();
-  return normalized.length > 0 ? normalized : null;
-}
-
-function parsePackageVersionFromImportMetaUrl(url: string): string | null {
-  const packagePath = `/${INK_PACKAGE_NAME}/`;
-  const packageIndex = url.indexOf(packagePath);
-  if (packageIndex === -1) {
-    return null;
-  }
-
-  const remainder = url.slice(packageIndex + packagePath.length);
-  const slashIndex = remainder.indexOf("/");
-  if (slashIndex === -1) {
-    return null;
-  }
-
-  return normalizePackageVersion(remainder.slice(0, slashIndex));
-}
-
-function readPackageVersionFromJsonUrl(jsonUrl: URL): string | null {
-  if (jsonUrl.protocol !== "file:") {
-    return null;
-  }
-
-  try {
-    const filePath = fileUrlToPath(jsonUrl);
-    const parsed = parseJsonc(getNodeFs().readFileSync(filePath, "utf8"));
-    return isRecord(parsed) ? normalizePackageVersion(parsed.version) : null;
-  } catch {
-    return null;
-  }
-}
-
-function resolveInkPackageVersion(): string | null {
-  const versionFromUrl = parsePackageVersionFromImportMetaUrl(import.meta.url);
-  if (versionFromUrl) {
-    return versionFromUrl;
-  }
-
-  for (const configUrl of [
-    new URL("../deno.json", import.meta.url),
-    new URL("../package.json", import.meta.url),
-  ]) {
-    const version = readPackageVersionFromJsonUrl(configUrl);
-    if (version) {
-      return version;
-    }
-  }
-
-  return null;
 }
 
 function isInkPackageSource(source: string): boolean {
@@ -3956,10 +3894,10 @@ function getAutoDenoInkAliases(
   root: string,
   existingAlias: unknown,
 ): ViteAliasEntry[] {
-  if (!INK_NPM_SHIM_SPECIFIER) {
+  if (!INK_RUNTIME_SPECIFIER) {
     return [];
   }
-  if (!usesDenoInkNpmShim(root)) {
+  if (!isDenoProject(root)) {
     return [];
   }
 
@@ -3969,7 +3907,7 @@ function getAutoDenoInkAliases(
     if (!hasViteAliasForSource(aliases, source)) {
       autoAliases.push({
         find: source,
-        replacement: INK_NPM_SHIM_SPECIFIER,
+        replacement: INK_RUNTIME_SPECIFIER,
       });
     }
   }
@@ -3977,8 +3915,52 @@ function getAutoDenoInkAliases(
   return autoAliases;
 }
 
-function usesDenoInkNpmShim(root: string): boolean {
+function isDenoProject(root: string): boolean {
   return Boolean(findDenoConfigPath(root));
+}
+
+function getInkRuntimeSubpath(source: string): string | null {
+  if (!INK_PACKAGE_NPM_NAME) {
+    return null;
+  }
+
+  const packageLikeSources = [
+    { prefix: INK_PACKAGE_NAME, versioned: false },
+    { prefix: `jsr:${INK_PACKAGE_NAME}`, versioned: true },
+    { prefix: INK_PACKAGE_NPM_NAME, versioned: false },
+    { prefix: `npm:${INK_PACKAGE_NPM_NAME}`, versioned: true },
+  ];
+
+  for (const candidate of packageLikeSources) {
+    if (source === candidate.prefix) {
+      return "";
+    }
+    if (source.startsWith(`${candidate.prefix}/`)) {
+      return source.slice(candidate.prefix.length);
+    }
+    if (!candidate.versioned || !source.startsWith(`${candidate.prefix}@`)) {
+      continue;
+    }
+
+    const versionStart = candidate.prefix.length + 1;
+    const slashIndex = source.indexOf("/", versionStart);
+    return slashIndex === -1 ? "" : source.slice(slashIndex);
+  }
+
+  return null;
+}
+
+function normalizeInkRuntimeSpecifier(source: string): string | null {
+  if (!INK_RUNTIME_SPECIFIER) {
+    return null;
+  }
+
+  const subpath = getInkRuntimeSubpath(source);
+  if (subpath === null) {
+    return null;
+  }
+
+  return `${INK_RUNTIME_SPECIFIER}${subpath}`;
 }
 
 function resolveAliasedInkImportSource(
@@ -3989,43 +3971,18 @@ function resolveAliasedInkImportSource(
   for (const alias of aliases) {
     const aliased = applyViteAlias(source, alias);
     if (aliased && aliased !== source) {
-      return aliased;
+      if (!isDenoProject(root)) {
+        return aliased;
+      }
+      return normalizeInkRuntimeSpecifier(aliased) ?? aliased;
     }
   }
 
-  if (!usesDenoInkNpmShim(root)) {
+  if (!isDenoProject(root)) {
     return null;
   }
 
-  const jsrPrefix = `jsr:${INK_PACKAGE_NAME}`;
-  if (!INK_PACKAGE_NPM_NAME) {
-    return null;
-  }
-
-  if (source === INK_PACKAGE_NAME || source === jsrPrefix) {
-    return INK_NPM_SHIM_SPECIFIER;
-  }
-
-  if (source.startsWith(`${INK_PACKAGE_NAME}/`)) {
-    return `${INK_NPM_SHIM_SPECIFIER}${source.slice(INK_PACKAGE_NAME.length)}`;
-  }
-
-  if (source.startsWith(`${jsrPrefix}/`)) {
-    return `${INK_NPM_SHIM_SPECIFIER}${source.slice(jsrPrefix.length)}`;
-  }
-
-  if (!source.startsWith(`${jsrPrefix}@`)) {
-    return null;
-  }
-
-  const versionStart = jsrPrefix.length + 1;
-  const slashIndex = source.indexOf("/", versionStart);
-  const version = slashIndex === -1
-    ? source.slice(versionStart)
-    : source.slice(versionStart, slashIndex);
-  const subpath = slashIndex === -1 ? "" : source.slice(slashIndex);
-
-  return `npm:${INK_PACKAGE_NPM_NAME}${version ? `@${version}` : ""}${subpath}`;
+  return normalizeInkRuntimeSpecifier(source);
 }
 
 function rewriteInkImportSpecifiers(
@@ -4576,6 +4533,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       }
       if (cleanId(id) === PUBLIC_TAILWIND_RUNTIME_ID) {
         return RESOLVED_TAILWIND_RUNTIME_ID;
+      }
+      if (isDenoProject(projectRoot)) {
+        const normalizedInkId = normalizeInkRuntimeSpecifier(id);
+        if (normalizedInkId && normalizedInkId !== id) {
+          return normalizedInkId;
+        }
       }
       return null;
     },
