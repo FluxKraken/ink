@@ -294,24 +294,21 @@ function getNodeRequire(): NodeRequire | null {
   }
 
   const moduleBuiltin = getBuiltinModule("node:module") as NodeModule | null;
-  const tryCreateRequire = (hint: string): NodeRequire | null => {
-    if (!moduleBuiltin || typeof moduleBuiltin.createRequire !== "function") {
-      return null;
-    }
-
-    try {
-      return moduleBuiltin.createRequire(hint) as NodeRequire;
-    } catch {
-      return null;
-    }
-  };
-
   if (moduleBuiltin && typeof moduleBuiltin.createRequire === "function") {
-    const moduleRequire = tryCreateRequire(import.meta.url);
-    if (moduleRequire) {
-      nodeRequire = moduleRequire;
+    try {
+      nodeRequire = moduleBuiltin.createRequire(import.meta.url) as NodeRequire;
       return nodeRequire;
+    } catch {
+      // Deno/JSR remote module URLs can fail here; continue with local fallbacks.
     }
+
+    const tryCreateRequire = (hint: string): NodeRequire | null => {
+      try {
+        return moduleBuiltin.createRequire(hint) as NodeRequire;
+      } catch {
+        return null;
+      }
+    };
 
     const cwd =
       typeof process === "object" && process && typeof process.cwd === "function"
