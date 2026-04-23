@@ -307,12 +307,10 @@ function getNodeRequire(): NodeRequire | null {
   };
 
   if (moduleBuiltin && typeof moduleBuiltin.createRequire === "function") {
-    if (import.meta.url.startsWith("file:")) {
-      const localRequire = tryCreateRequire(import.meta.url);
-      if (localRequire) {
-        nodeRequire = localRequire;
-        return nodeRequire;
-      }
+    const moduleRequire = tryCreateRequire(import.meta.url);
+    if (moduleRequire) {
+      nodeRequire = moduleRequire;
+      return nodeRequire;
     }
 
     const cwd =
