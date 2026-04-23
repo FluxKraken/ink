@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+codex -m gpt-5.4-mini "I have staged changes to this repo, please go ahead and commit them with an appropriate message."

@@ -221,6 +221,238 @@ Deno.test("vite config injects npm shim aliases for Deno projects without packag
   }
 });
 
+Deno.test("vite config injects npm shim aliases for Deno projects with package.json", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.writeTextFileSync(
+      join(root, "deno.json"),
+      JSON.stringify({
+        imports: {
+          "@kraken/ink": "jsr:@kraken/ink@^0.5.16",
+        },
+      }),
+    );
+    Deno.writeTextFileSync(
+      join(root, "package.json"),
+      JSON.stringify({
+        type: "module",
+      }),
+    );
+
+    const plugin = inkVite();
+    const config = asHook(plugin.config);
+    const resolved = config({
+      root,
+      resolve: { alias: [] },
+    }) as {
+      resolve?: {
+        alias?: Array<{ find: string; replacement: string }>;
+      };
+    } | null;
+
+    assert(resolved && resolved.resolve);
+    assertEquals(resolved.resolve?.alias, [
+      {
+        find: "@kraken/ink",
+        replacement: `npm:@jsr/kraken__ink@${PACKAGE_VERSION}`,
+      },
+      {
+        find: "jsr:@kraken/ink",
+        replacement: `npm:@jsr/kraken__ink@${PACKAGE_VERSION}`,
+      },
+    ]);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite rewrites Deno ink imports in plain modules", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.writeTextFileSync(join(root, "deno.json"), JSON.stringify({}));
+
+    const plugin = inkVite();
+    const config = asHook(plugin.config);
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+    const partial = config({
+      root,
+      resolve: { alias: [] },
+    }) as {
+      resolve?: {
+        alias?: Array<{ find: string; replacement: string }>;
+      };
+    } | null;
+
+    configResolved({
+      root,
+      resolve: {
+        alias: partial?.resolve?.alias ?? [],
+      },
+    });
+
+    const transformed = transform(
+      `import { Theme } from "@kraken/ink";\nexport const theme = Theme;\n`,
+      join(root, "src", "theme.ts"),
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assertMatch(
+      code,
+      new RegExp(
+        `from "npm:@jsr/kraken__ink@${PACKAGE_VERSION.replaceAll(".", "\\.")}"`,
+      ),
+    );
+    assert(!code.includes(`from "@kraken/ink"`));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite rewrites versioned jsr ink imports in Deno modules", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.writeTextFileSync(join(root, "deno.json"), JSON.stringify({}));
+
+    const plugin = inkVite();
+    const config = asHook(plugin.config);
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+    const partial = config({
+      root,
+      resolve: { alias: [] },
+    }) as {
+      resolve?: {
+        alias?: Array<{ find: string; replacement: string }>;
+      };
+    } | null;
+
+    configResolved({
+      root,
+      resolve: {
+        alias: partial?.resolve?.alias ?? [],
+      },
+    });
+
+    const transformed = transform(
+      `import { Theme } from "jsr:@kraken/ink@^0.5.16";\nexport const theme = Theme;\n`,
+      join(root, "src", "theme.ts"),
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.includes(`from "npm:@jsr/kraken__ink@^0.5.16"`));
+    assert(!code.includes(`from "jsr:@kraken/ink@^0.5.16"`));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite rewrites Deno svelte ink imports when package.json is present", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.writeTextFileSync(join(root, "deno.json"), JSON.stringify({}));
+    Deno.writeTextFileSync(
+      join(root, "package.json"),
+      JSON.stringify({
+        type: "module",
+      }),
+    );
+
+    const plugin = inkVite();
+    const config = asHook(plugin.config);
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+    const partial = config({
+      root,
+      resolve: { alias: [] },
+    }) as {
+      resolve?: {
+        alias?: Array<{ find: string; replacement: string }>;
+      };
+    } | null;
+
+    configResolved({
+      root,
+      resolve: {
+        alias: partial?.resolve?.alias ?? [],
+      },
+    });
+
+    const transformed = transform(
+      `<script lang="ts">\n` +
+        `import ink from "@kraken/ink";\n` +
+        `const styles = ink({ base: { card: { display: "grid" } } });\n` +
+        `</script>\n` +
+        `<div class={styles().card()}></div>\n`,
+      join(root, "src", "Card.svelte"),
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assertMatch(
+      code,
+      new RegExp(
+        `import ink from "npm:@jsr/kraken__ink@${PACKAGE_VERSION.replaceAll(".", "\\.")}";`,
+      ),
+    );
+    assert(!code.includes(`import ink from "@kraken/ink";`));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite rewrites ink imports to explicit alias targets in svelte", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+
+    configResolved({
+      root,
+      resolve: {
+        alias: [
+          {
+            find: "@kraken/ink",
+            replacement: "npm:@jsr/kraken__ink@9.9.9",
+          },
+        ],
+      },
+    });
+
+    const transformed = transform(
+      `<script lang="ts">\n` +
+        `import ink from "@kraken/ink";\n` +
+        `const styles = ink({ base: { card: { display: "grid" } } });\n` +
+        `</script>\n` +
+        `<div class={styles().card()}></div>\n`,
+      join(root, "src", "Card.svelte"),
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.includes(`import ink from "npm:@jsr/kraken__ink@9.9.9";`));
+    assert(!code.includes(`import ink from "@kraken/ink";`));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("vite extracts css when ink is imported through a file-url alias", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);

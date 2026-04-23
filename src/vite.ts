@@ -3959,7 +3959,7 @@ function getAutoDenoInkAliases(
   if (!INK_NPM_SHIM_SPECIFIER) {
     return [];
   }
-  if (!findDenoConfigPath(root) || findFileUpwards(root, ["package.json"])) {
+  if (!usesDenoInkNpmShim(root)) {
     return [];
   }
 
@@ -3975,6 +3975,85 @@ function getAutoDenoInkAliases(
   }
 
   return autoAliases;
+}
+
+function usesDenoInkNpmShim(root: string): boolean {
+  return Boolean(findDenoConfigPath(root));
+}
+
+function resolveAliasedInkImportSource(
+  source: string,
+  aliases: readonly ViteAliasEntry[],
+  root: string,
+): string | null {
+  for (const alias of aliases) {
+    const aliased = applyViteAlias(source, alias);
+    if (aliased && aliased !== source) {
+      return aliased;
+    }
+  }
+
+  if (!usesDenoInkNpmShim(root)) {
+    return null;
+  }
+
+  const jsrPrefix = `jsr:${INK_PACKAGE_NAME}`;
+  if (!INK_PACKAGE_NPM_NAME) {
+    return null;
+  }
+
+  if (source === INK_PACKAGE_NAME || source === jsrPrefix) {
+    return INK_NPM_SHIM_SPECIFIER;
+  }
+
+  if (source.startsWith(`${INK_PACKAGE_NAME}/`)) {
+    return `${INK_NPM_SHIM_SPECIFIER}${source.slice(INK_PACKAGE_NAME.length)}`;
+  }
+
+  if (source.startsWith(`${jsrPrefix}/`)) {
+    return `${INK_NPM_SHIM_SPECIFIER}${source.slice(jsrPrefix.length)}`;
+  }
+
+  if (!source.startsWith(`${jsrPrefix}@`)) {
+    return null;
+  }
+
+  const versionStart = jsrPrefix.length + 1;
+  const slashIndex = source.indexOf("/", versionStart);
+  const version = slashIndex === -1
+    ? source.slice(versionStart)
+    : source.slice(versionStart, slashIndex);
+  const subpath = slashIndex === -1 ? "" : source.slice(slashIndex);
+
+  return `npm:${INK_PACKAGE_NPM_NAME}${version ? `@${version}` : ""}${subpath}`;
+}
+
+function rewriteInkImportSpecifiers(
+  code: string,
+  aliases: readonly ViteAliasEntry[],
+  root: string,
+): string {
+  const replaceSource = (
+    full: string,
+    prefix: string,
+    quote: string,
+    source: string,
+  ): string => {
+    const rewritten = resolveAliasedInkImportSource(source, aliases, root);
+    if (!rewritten || rewritten === source) {
+      return full;
+    }
+    return `${prefix}${quote}${rewritten}${quote}`;
+  };
+
+  return [
+    /(\bimport\s+(?:type\s+)?(?:[\w$]+\s*(?:,\s*(?:\{[\s\S]*?\}|\*\s*as\s*[\w$]+))?|\*\s*as\s*[\w$]+|\{[\s\S]*?\})\s*from\s*)(["'])([^"']+)\2/g,
+    /(\bexport\s+(?:type\s+)?(?:\*|\{[\s\S]*?\})\s*from\s*)(["'])([^"']+)\2/g,
+    /(\bimport\s*)(["'])([^"']+)\2/g,
+  ].reduce(
+    (nextCode, pattern) => nextCode.replace(pattern, replaceSource),
+    code,
+  );
 }
 
 function resolveAliasedPath(
@@ -4545,7 +4624,8 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       }
       const isSvelte = normalizedId.endsWith(".svelte");
       const isAstro = normalizedId.endsWith(".astro");
-      let nextCode = code;
+      let nextCode = rewriteInkImportSpecifiers(code, viteAliases, projectRoot);
+      const didRewriteInkImports = nextCode !== code;
       const importResolverOptions: ImportResolverOptions = {
         projectRoot,
         viteRoot,
@@ -4565,6 +4645,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       if (
         !isSvelte &&
         !isAstro &&
+        !didRewriteInkImports &&
         !hasInkImport(currentModuleInfo, normalizedId, importResolverOptions)
       ) {
         return null;
@@ -4599,12 +4680,22 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         );
       if (calls.length === 0 && newInkDecls.length === 0) {
         if (!isSvelte && !isAstro) {
-          return null;
+          return didRewriteInkImports
+            ? {
+              code: nextCode,
+              map: null,
+            }
+            : null;
         }
 
         const usesStylesCall = /\bstyles\s*\(\s*\)/.test(nextCode);
         if (!usesStylesCall) {
-          return null;
+          return didRewriteInkImports
+            ? {
+              code: nextCode,
+              map: null,
+            }
+            : null;
         }
 
         nextCode = isSvelte
