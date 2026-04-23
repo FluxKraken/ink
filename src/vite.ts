@@ -578,14 +578,12 @@ function toJsrNpmPackageName(packageName: string): string | null {
 }
 
 const INK_PACKAGE_NPM_NAME = toJsrNpmPackageName(INK_PACKAGE_NAME);
-const INK_PACKAGE_IMPORT_SOURCES = new Set(
-  [
-    INK_PACKAGE_NAME,
-    `jsr:${INK_PACKAGE_NAME}`,
-    INK_PACKAGE_NPM_NAME,
-    INK_PACKAGE_NPM_NAME ? `npm:${INK_PACKAGE_NPM_NAME}` : null,
-  ].filter((value): value is string => typeof value === "string"),
-);
+const INK_PACKAGE_VERSION = resolveInkPackageVersion();
+const INK_NPM_SHIM_SPECIFIER = INK_PACKAGE_NPM_NAME
+  ? `npm:${INK_PACKAGE_NPM_NAME}${
+    INK_PACKAGE_VERSION ? `@${INK_PACKAGE_VERSION}` : ""
+  }`
+  : null;
 let inkEntryFiles: Set<string> | null = null;
 let staticInkDefaultExport: Record<string, unknown> | null = null;
 
@@ -595,6 +593,78 @@ function fileUrlToPath(urlValue: URL): string {
     filePath = filePath.slice(1);
   }
   return filePath;
+}
+
+function normalizePackageVersion(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parsePackageVersionFromImportMetaUrl(url: string): string | null {
+  const packagePath = `/${INK_PACKAGE_NAME}/`;
+  const packageIndex = url.indexOf(packagePath);
+  if (packageIndex === -1) {
+    return null;
+  }
+
+  const remainder = url.slice(packageIndex + packagePath.length);
+  const slashIndex = remainder.indexOf("/");
+  if (slashIndex === -1) {
+    return null;
+  }
+
+  return normalizePackageVersion(remainder.slice(0, slashIndex));
+}
+
+function readPackageVersionFromJsonUrl(jsonUrl: URL): string | null {
+  if (jsonUrl.protocol !== "file:") {
+    return null;
+  }
+
+  try {
+    const filePath = fileUrlToPath(jsonUrl);
+    const parsed = parseJsonc(getNodeFs().readFileSync(filePath, "utf8"));
+    return isRecord(parsed) ? normalizePackageVersion(parsed.version) : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveInkPackageVersion(): string | null {
+  const versionFromUrl = parsePackageVersionFromImportMetaUrl(import.meta.url);
+  if (versionFromUrl) {
+    return versionFromUrl;
+  }
+
+  for (const configUrl of [
+    new URL("../deno.json", import.meta.url),
+    new URL("../package.json", import.meta.url),
+  ]) {
+    const version = readPackageVersionFromJsonUrl(configUrl);
+    if (version) {
+      return version;
+    }
+  }
+
+  return null;
+}
+
+function isInkPackageSource(source: string): boolean {
+  if (source === INK_PACKAGE_NAME || source === `jsr:${INK_PACKAGE_NAME}`) {
+    return true;
+  }
+  if (source.startsWith(`jsr:${INK_PACKAGE_NAME}@`)) {
+    return true;
+  }
+  if (!INK_PACKAGE_NPM_NAME) {
+    return false;
+  }
+  return source === INK_PACKAGE_NPM_NAME ||
+    source === `npm:${INK_PACKAGE_NPM_NAME}` ||
+    source.startsWith(`npm:${INK_PACKAGE_NPM_NAME}@`);
 }
 
 function getInkEntryFiles(): ReadonlySet<string> {
@@ -639,7 +709,7 @@ function isInkImportSource(
   importerId: string,
   options: ImportResolverOptions,
 ): boolean {
-  if (INK_PACKAGE_IMPORT_SOURCES.has(source)) {
+  if (isInkPackageSource(source)) {
     return true;
   }
 
@@ -3886,7 +3956,7 @@ function getAutoDenoInkAliases(
   root: string,
   existingAlias: unknown,
 ): ViteAliasEntry[] {
-  if (!INK_PACKAGE_NPM_NAME) {
+  if (!INK_NPM_SHIM_SPECIFIER) {
     return [];
   }
   if (!findDenoConfigPath(root) || findFileUpwards(root, ["package.json"])) {
@@ -3899,7 +3969,7 @@ function getAutoDenoInkAliases(
     if (!hasViteAliasForSource(aliases, source)) {
       autoAliases.push({
         find: source,
-        replacement: INK_PACKAGE_NPM_NAME,
+        replacement: INK_NPM_SHIM_SPECIFIER,
       });
     }
   }

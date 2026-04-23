@@ -205,7 +205,7 @@ it looks like this:
 // deno.json
 {
   "imports": {
-    "@kraken/ink": "npm:@jsr/kraken__ink"
+    "@kraken/ink": "npm:@jsr/kraken__ink@0.5.14"
   }
 }
 ```
@@ -218,7 +218,7 @@ import inkVite from "@kraken/ink/vite";
 export default defineConfig({
   resolve: {
     alias: {
-      "@kraken/ink": "@jsr/kraken__ink",
+      "@kraken/ink": "npm:@jsr/kraken__ink@0.5.14",
     },
   },
   plugins: [inkVite()],

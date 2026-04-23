@@ -30,6 +30,11 @@ import {
 const VIRTUAL_ID = "\0virtual:ink/styles.css";
 const TAILWIND_RUNTIME_VIRTUAL_ID = "\0virtual:ink/tailwind-merge";
 const MODULE_VIRTUAL_QUERY_KEY = "ink-module";
+const PACKAGE_VERSION = (
+  JSON.parse(Deno.readTextFileSync(join(Deno.cwd(), "deno.json"))) as {
+    version?: string;
+  }
+).version ?? "0.0.0";
 
 function scopedVirtualId(moduleId: string): string {
   return `${VIRTUAL_ID}?${MODULE_VIRTUAL_QUERY_KEY}=${
@@ -201,8 +206,14 @@ Deno.test("vite config injects npm shim aliases for Deno projects without packag
 
     assert(resolved && resolved.resolve);
     assertEquals(resolved.resolve?.alias, [
-      { find: "@kraken/ink", replacement: "@jsr/kraken__ink" },
-      { find: "jsr:@kraken/ink", replacement: "@jsr/kraken__ink" },
+      {
+        find: "@kraken/ink",
+        replacement: `npm:@jsr/kraken__ink@${PACKAGE_VERSION}`,
+      },
+      {
+        find: "jsr:@kraken/ink",
+        replacement: `npm:@jsr/kraken__ink@${PACKAGE_VERSION}`,
+      },
     ]);
   } finally {
     Deno.removeSync(root, { recursive: true });
@@ -239,6 +250,23 @@ Deno.test("vite extracts css when ink is imported through a file-url alias", () 
   const css = load(VIRTUAL_ID) as string;
   assertMatch(css, /:root\{--gap:1rem\}/);
   assertMatch(css, /\.ink_[a-z0-9]+\{display:grid;gap:var\(--gap\)\}/);
+});
+
+Deno.test("vite extracts css from versioned npm shim imports", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const moduleCode =
+    `import ink from "npm:@jsr/kraken__ink@${PACKAGE_VERSION}";\n` +
+    `export const styles = ink({ base: { card: { display: "grid" } } });`;
+  const transformed = transform(moduleCode, "/app/src/lib/npm-shim.ts");
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(css, /\.ink_[a-z0-9]+\{display:grid\}/);
 });
 
 Deno.test("vite resolves aliased helper imports from file-url ink modules", () => {

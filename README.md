@@ -53,7 +53,8 @@ In Deno + Vite projects, import Ink through `@kraken/ink` and
 `@kraken/ink/vite` after `deno add jsr:@kraken/ink`. Direct `jsr:` specifiers
 are not reliable in `vite.config.*`, and Vite can also miss them during
 dependency scanning. When a Deno project has no `package.json`, the plugin now
-adds the JSR npm-shim aliases for `@kraken/ink` automatically.
+adds matching versioned npm-shim aliases for `@kraken/ink` automatically, for
+example `npm:@jsr/kraken__ink@0.5.14`.
 
 By default the plugin transforms files inside `<project-root>/src/**` and
 `<project-root>/app/**` (for frameworks like TanStack Start). You can extend
