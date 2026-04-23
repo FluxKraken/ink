@@ -294,9 +294,59 @@ function getNodeRequire(): NodeRequire | null {
   }
 
   const moduleBuiltin = getBuiltinModule("node:module") as NodeModule | null;
+  const tryCreateRequire = (hint: string): NodeRequire | null => {
+    if (!moduleBuiltin || typeof moduleBuiltin.createRequire !== "function") {
+      return null;
+    }
+
+    try {
+      return moduleBuiltin.createRequire(hint) as NodeRequire;
+    } catch {
+      return null;
+    }
+  };
+
   if (moduleBuiltin && typeof moduleBuiltin.createRequire === "function") {
-    nodeRequire = moduleBuiltin.createRequire(import.meta.url) as NodeRequire;
-    return nodeRequire;
+    if (import.meta.url.startsWith("file:")) {
+      const localRequire = tryCreateRequire(import.meta.url);
+      if (localRequire) {
+        nodeRequire = localRequire;
+        return nodeRequire;
+      }
+    }
+
+    const cwd =
+      typeof process === "object" && process && typeof process.cwd === "function"
+        ? process.cwd()
+        : null;
+
+    if (cwd) {
+      const candidateFiles = [
+        "package.json",
+        "vite.config.ts",
+        "vite.config.mts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "deno.json",
+        "deno.jsonc",
+        "tsconfig.json",
+      ];
+
+      for (const candidateFile of candidateFiles) {
+        const candidatePath = `${cwd}/${candidateFile}`.replace(/\\/g, "/");
+        const req = tryCreateRequire(candidatePath);
+        if (req) {
+          nodeRequire = req;
+          return nodeRequire;
+        }
+      }
+
+      const cwdRequire = tryCreateRequire(`file://${cwd.replace(/\\/g, "/")}/`);
+      if (cwdRequire) {
+        nodeRequire = cwdRequire;
+        return nodeRequire;
+      }
+    }
   }
 
   nodeRequire = getFallbackRequire();
