@@ -10,6 +10,7 @@ import { inkVite } from "./src/vite.ts";
 import { getNextThemeName, resolveManagedThemeEntries } from "./src/react.ts";
 import ink from "./src/runtime.ts";
 import {
+  findInkCalls,
   findNewInkDeclarations,
   parseInkCallArguments,
   parseInkConfig,
@@ -5457,6 +5458,17 @@ content.variant = { prose: { true: { color: "red" } } };`;
   assertEquals(decls[0].assignments.length, 2);
 });
 
+Deno.test("parser findInkCalls ignores compiled ink() runtime calls", () => {
+  const code = `import ink from "@kraken/ink";
+const styles = ink(
+  { base: { card: { display: "grid" } } },
+  { base: { card: "ink_card" } },
+  { resolution: "static" }
+);`;
+
+  assertEquals(findInkCalls(code), []);
+});
+
 Deno.test("parser accepts pre-normalized simple config fragments", () => {
   const partialBase = parseInkCallArguments(`{
     simple: true,
@@ -5603,6 +5615,24 @@ Deno.test(
     assert(code.includes(`"simple":true`));
   },
 );
+
+Deno.test("vite skips already transformed Svelte ink runtime calls", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const source = `<script lang="ts">\n` +
+    `import ink from "@kraken/ink";\n` +
+    `let { children } = $props();\n` +
+    `const wrapper = new ink({ simple: true });\n` +
+    `wrapper.base = { display: "grid" };\n` +
+    `</script>\n` +
+    `<div class={wrapper()}>{@render children?.()}</div>\n`;
+
+  const first = transform(source, "/app/src/lib/Container.svelte");
+  assert(first && typeof first === "object" && "code" in first);
+
+  const second = transform(first.code as string, "/app/src/lib/Container.svelte");
+  assertEquals(second, null);
+});
 
 Deno.test(
   "vite statically extracts simple builder configs with tVar references",

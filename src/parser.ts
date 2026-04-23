@@ -2075,6 +2075,106 @@ export function parseInkCallArgumentsWithResolver(
   return parseInkCallArgumentsInternal(source, resolveIdentifier, options);
 }
 
+function findObjectLiteralEnd(input: string, start: number): number {
+  if (input[start] !== "{") {
+    return -1;
+  }
+
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let parenDepth = 0;
+  let inString: "" | '"' | "'" | "`" = "";
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = start; i < input.length; i += 1) {
+    const char = input[i];
+    const next = input[i + 1];
+
+    if (inLineComment) {
+      if (char === "\n") {
+        inLineComment = false;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (char === "*" && next === "/") {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === inString) {
+        inString = "";
+      }
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      inString = char;
+      continue;
+    }
+
+    if (char === "{") {
+      braceDepth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      braceDepth -= 1;
+      if (braceDepth === 0 && bracketDepth === 0 && parenDepth === 0) {
+        return i + 1;
+      }
+      continue;
+    }
+
+    if (char === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+
+    if (char === "]") {
+      bracketDepth -= 1;
+      continue;
+    }
+
+    if (char === "(") {
+      parenDepth += 1;
+      continue;
+    }
+
+    if (char === ")") {
+      parenDepth -= 1;
+    }
+  }
+
+  return -1;
+}
+
 function escapeForRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -2115,59 +2215,28 @@ export function findInkCalls(
     if (before === "." || isIdentifierPart(before)) {
       continue;
     }
-    let index = matcher.lastIndex;
+    const argStart = skipWhitespace(code, matcher.lastIndex);
 
-    index = skipWhitespace(code, index);
-    if (code[index] !== "{") {
+    if (code[argStart] !== "{") {
       continue;
     }
 
-    let parenDepth = 1;
-    let inString = "";
-    let escaped = false;
-
-    for (; index < code.length; index += 1) {
-      const char = code[index];
-
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-          continue;
-        }
-        if (char === "\\") {
-          escaped = true;
-          continue;
-        }
-        if (char === inString) {
-          inString = "";
-        }
-        continue;
-      }
-
-      if (char === '"' || char === "'") {
-        inString = char;
-        continue;
-      }
-
-      if (char === "(") {
-        parenDepth += 1;
-        continue;
-      }
-
-      if (char === ")") {
-        parenDepth -= 1;
-        if (parenDepth === 0) {
-          const argEnd = index;
-          calls.push({
-            start: callStart,
-            end: argEnd + 1,
-            arg: code.slice(match[0].length + callStart, argEnd),
-            callee: match[1],
-          });
-          break;
-        }
-      }
+    const argEnd = findObjectLiteralEnd(code, argStart);
+    if (argEnd < 0) {
+      continue;
     }
+
+    const callEnd = skipWhitespace(code, argEnd);
+    if (code[callEnd] !== ")") {
+      continue;
+    }
+
+    calls.push({
+      start: callStart,
+      end: callEnd + 1,
+      arg: code.slice(argStart, argEnd),
+      callee: match[1],
+    });
   }
 
   return calls;
