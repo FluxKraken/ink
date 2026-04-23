@@ -2075,14 +2075,39 @@ export function parseInkCallArgumentsWithResolver(
   return parseInkCallArgumentsInternal(source, resolveIdentifier, options);
 }
 
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeInkIdentifierCandidates(
+  identifiers: Iterable<string>,
+): string[] {
+  const unique = new Set<string>();
+  for (const identifier of identifiers) {
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(identifier)) {
+      unique.add(identifier);
+    }
+  }
+  return Array.from(unique);
+}
+
 /**
  * Find `ink(...)` calls in source code and return their locations plus raw arguments.
  */
 export function findInkCalls(
   code: string,
-): Array<{ start: number; end: number; arg: string }> {
-  const calls: Array<{ start: number; end: number; arg: string }> = [];
-  const matcher = /\bink\s*\(/g;
+  identifiers: Iterable<string> = ["ink"],
+): Array<{ start: number; end: number; arg: string; callee: string }> {
+  const names = normalizeInkIdentifierCandidates(identifiers);
+  if (names.length === 0) {
+    return [];
+  }
+
+  const calls: Array<{ start: number; end: number; arg: string; callee: string }> = [];
+  const matcher = new RegExp(
+    `\\b(${names.map(escapeForRegExp).join("|")})\\s*\\(`,
+    "g",
+  );
 
   for (let match = matcher.exec(code); match; match = matcher.exec(code)) {
     const callStart = match.index;
@@ -2137,6 +2162,7 @@ export function findInkCalls(
             start: callStart,
             end: argEnd + 1,
             arg: code.slice(match[0].length + callStart, argEnd),
+            callee: match[1],
           });
           break;
         }
@@ -2359,6 +2385,7 @@ type NewInkAssignment = {
 
 type NewInkDeclaration = {
   varName: string;
+  constructorName: string;
   start: number;
   initializerStart: number;
   initializerEnd: number;
@@ -2393,11 +2420,23 @@ function findClosingParenIndex(input: string, openParenIndex: number): number {
  * assignments (`x.base = ...`, `x.global = ...`, `x.root = ...`, etc.) for
  * static extraction.
  */
-export function findNewInkDeclarations(code: string): NewInkDeclaration[] {
+export function findNewInkDeclarations(
+  code: string,
+  constructorNames: Iterable<string> = ["ink"],
+): NewInkDeclaration[] {
+  const names = normalizeInkIdentifierCandidates(constructorNames);
+  if (names.length === 0) {
+    return [];
+  }
+
   const declarations: NewInkDeclaration[] = [];
   const searchable = maskStringsAndComments(code);
-  const matcher =
-    /\b(const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*new\s+ink\s*\(/g;
+  const matcher = new RegExp(
+    `\\b(const|let)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*new\\s+(${
+      names.map(escapeForRegExp).join("|")
+    })\\s*\\(`,
+    "g",
+  );
 
   for (
     let match = matcher.exec(searchable);
@@ -2405,6 +2444,7 @@ export function findNewInkDeclarations(code: string): NewInkDeclaration[] {
     match = matcher.exec(searchable)
   ) {
     const varName = match[2];
+    const constructorName = match[3];
     const declStart = match.index;
     const initializerStart = searchable.indexOf("new", declStart);
     const openParenIndex = matcher.lastIndex - 1;
@@ -2485,6 +2525,7 @@ export function findNewInkDeclarations(code: string): NewInkDeclaration[] {
 
     declarations.push({
       varName,
+      constructorName,
       start: declStart,
       initializerStart,
       initializerEnd: declEnd,

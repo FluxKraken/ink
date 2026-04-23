@@ -175,6 +175,119 @@ function assertPackageTypesSucceed(source: string): void {
   }
 }
 
+Deno.test("vite config injects npm shim aliases for Deno projects without package.json", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.writeTextFileSync(
+      join(root, "deno.json"),
+      JSON.stringify({
+        imports: {
+          "@kraken/ink": "jsr:@kraken/ink@^0.5.13",
+        },
+      }),
+    );
+
+    const plugin = inkVite();
+    const config = asHook(plugin.config);
+    const resolved = config({
+      root,
+      resolve: { alias: [] },
+    }) as {
+      resolve?: {
+        alias?: Array<{ find: string; replacement: string }>;
+      };
+    } | null;
+
+    assert(resolved && resolved.resolve);
+    assertEquals(resolved.resolve?.alias, [
+      { find: "@kraken/ink", replacement: "@jsr/kraken__ink" },
+      { find: "jsr:@kraken/ink", replacement: "@jsr/kraken__ink" },
+    ]);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite extracts css when ink is imported through a file-url alias", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const runtimeSpecifier = toFileUrl(join(Deno.cwd(), "src", "index.ts"))
+    .href;
+
+  const moduleCode = `import styling, { cVar as cssVar } from ${
+    JSON.stringify(runtimeSpecifier)
+  };\n` +
+    `const styles = new styling();\n` +
+    `styles.root = [{ "--gap": "1rem" }];\n` +
+    `styles.base = {\n` +
+    `  card: {\n` +
+    `    display: "grid",\n` +
+    `    gap: cssVar("--gap"),\n` +
+    `  },\n` +
+    `};\n`;
+  const transformed = transform(moduleCode, "/app/src/lib/aliased-ink.ts");
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const code = transformed.code as string;
+  assert(!code.includes("new styling()"));
+  assert(code.includes("styling("));
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(css, /:root\{--gap:1rem\}/);
+  assertMatch(css, /\.ink_[a-z0-9]+\{display:grid;gap:var\(--gap\)\}/);
+});
+
+Deno.test("vite resolves aliased helper imports from file-url ink modules", () => {
+  const root = Deno.makeTempDirSync();
+  const runtimeSpecifier = toFileUrl(join(Deno.cwd(), "src", "index.ts"))
+    .href;
+
+  try {
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+    const themesId = `${root}/src/lib/themes.ts`;
+    const pageId = `${root}/src/routes/+page.svelte`;
+
+    Deno.mkdirSync(`${root}/src/lib`, { recursive: true });
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      themesId,
+      `import { Theme as InkTheme } from ${JSON.stringify(runtimeSpecifier)};\n` +
+        `const dark = new InkTheme({ bg: "black", fg: "white" });\n` +
+        `export default { dark } as const;\n`,
+    );
+
+    const source = `<script lang="ts">\n` +
+      `import styling, { tVar as inkVar } from ${
+        JSON.stringify(runtimeSpecifier)
+      };\n` +
+      `import Themes from "../lib/themes.ts";\n` +
+      `const styles = new styling();\n` +
+      `styles.themes = { default: Themes.dark };\n` +
+      `styles.base = { header: { backgroundColor: inkVar.bg, color: inkVar.fg } };\n` +
+      `</script>\n` +
+      `<header class={styles().header()}>hi</header>`;
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(source, pageId);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    assertMatch(transformed.code as string, /--bg:black/);
+    assertMatch(transformed.code as string, /background-color:var\(--bg\)/);
+    assertMatch(transformed.code as string, /color:var\(--fg\)/);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("injects component CSS for direct ink usage in svelte", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);

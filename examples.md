@@ -196,9 +196,10 @@ export default defineConfig({
 
 ## Deno + Vite without `package.json`
 
-When you install from JSR and do not have a `package.json`, Vite still needs a
-Node-compatible import target. Map the package to its npm shim and add a Vite
-alias.
+When you install from JSR and do not have a `package.json`, keep your source
+imports on `@kraken/ink` and `@kraken/ink/vite`. The plugin now injects the Vite
+alias to the npm shim automatically. If you need the equivalent manual setup,
+it looks like this:
 
 ```json
 // deno.json

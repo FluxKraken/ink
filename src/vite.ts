@@ -140,6 +140,13 @@ type ViteResolvedConfigLike = {
   };
 };
 
+type ViteConfigLike = {
+  root?: string;
+  resolve?: {
+    alias?: unknown;
+  };
+};
+
 type ViteTransformContextLike = {
   addWatchFile?: (id: string) => void;
 };
@@ -226,6 +233,7 @@ type TypeScriptAstApi = TypeScriptTranspileApi & {
   forEachChild: (node: unknown, cbNode: (node: unknown) => void) => void;
 };
 type AstInkCall = {
+  callee: string;
   start: number;
   end: number;
   arg: string;
@@ -238,6 +246,7 @@ type AstNewInkAssignment = {
 };
 type AstNewInkDeclaration = {
   varName: string;
+  constructorName: string;
   start: number;
   initializerStart: number;
   initializerEnd: number;
@@ -558,14 +567,103 @@ function supportsTransform(id: string): boolean {
   return /\.(?:[jt]sx?|svelte|astro)$/.test(cleanId(id));
 }
 
-const INK_IMPORT_SOURCES = [
-  "@kraken/ink",
-  "@jsr/kraken__ink",
-] as const;
+const INK_PACKAGE_NAME = "@kraken/ink";
+
+function toJsrNpmPackageName(packageName: string): string | null {
+  const scopedMatch = packageName.match(/^@([^/]+)\/([^/]+)$/);
+  if (!scopedMatch) {
+    return null;
+  }
+  return `@jsr/${scopedMatch[1]}__${scopedMatch[2]}`;
+}
+
+const INK_PACKAGE_NPM_NAME = toJsrNpmPackageName(INK_PACKAGE_NAME);
+const INK_PACKAGE_IMPORT_SOURCES = new Set(
+  [
+    INK_PACKAGE_NAME,
+    `jsr:${INK_PACKAGE_NAME}`,
+    INK_PACKAGE_NPM_NAME,
+    INK_PACKAGE_NPM_NAME ? `npm:${INK_PACKAGE_NPM_NAME}` : null,
+  ].filter((value): value is string => typeof value === "string"),
+);
+let inkEntryFiles: Set<string> | null = null;
 let staticInkDefaultExport: Record<string, unknown> | null = null;
 
-function isInkImportSource(source: string): boolean {
-  return (INK_IMPORT_SOURCES as readonly string[]).includes(source);
+function fileUrlToPath(urlValue: URL): string {
+  let filePath = decodeURIComponent(urlValue.pathname);
+  if (/^\/[A-Za-z]:\//.test(filePath)) {
+    filePath = filePath.slice(1);
+  }
+  return filePath;
+}
+
+function getInkEntryFiles(): ReadonlySet<string> {
+  if (inkEntryFiles) {
+    return inkEntryFiles;
+  }
+
+  const candidates = [
+    new URL("./index.ts", import.meta.url),
+    new URL("./index.js", import.meta.url),
+    new URL("../src/index.ts", import.meta.url),
+    new URL("../dist/index.js", import.meta.url),
+    new URL("../mod.ts", import.meta.url),
+    new URL("../mod.js", import.meta.url),
+  ];
+  inkEntryFiles = new Set(
+    candidates
+      .map(fileUrlToPath)
+      .filter((filePath) =>
+        getNodeFs().existsSync(filePath) &&
+        getNodeFs().statSync(filePath).isFile()
+      )
+      .map((filePath) => getNodePath().normalize(filePath)),
+  );
+  return inkEntryFiles;
+}
+
+function resolveImportSourceToFile(
+  importerId: string,
+  source: string,
+  options: ImportResolverOptions,
+): string | null {
+  const modulePath = moduleIdToFilePath(source, options.viteRoot);
+  if (modulePath && getNodeFs().existsSync(modulePath)) {
+    return getNodePath().normalize(modulePath);
+  }
+  return resolveImportToFile(importerId, source, options);
+}
+
+function isInkImportSource(
+  source: string,
+  importerId: string,
+  options: ImportResolverOptions,
+): boolean {
+  if (INK_PACKAGE_IMPORT_SOURCES.has(source)) {
+    return true;
+  }
+
+  const resolvedFile = resolveImportSourceToFile(importerId, source, options);
+  return resolvedFile !== null && getInkEntryFiles().has(resolvedFile);
+}
+
+function getInkDefaultImportNames(
+  moduleInfo: ModuleStaticInfo,
+  importerId: string,
+  options: ImportResolverOptions,
+): Set<string> {
+  const names = new Set<string>();
+  for (const [localName, binding] of moduleInfo.imports) {
+    const isDefaultBinding = binding.kind === "default" ||
+      (binding.kind === "named" && binding.imported === "default");
+    if (!isDefaultBinding) {
+      continue;
+    }
+    if (isInkImportSource(binding.source, importerId, options)) {
+      names.add(localName);
+    }
+  }
+  return names;
 }
 
 function getStaticInkDefaultExport(): Record<string, unknown> {
@@ -611,8 +709,10 @@ function getStaticInkNamespace(): Record<string, unknown> {
 function resolveStaticInkImport(
   binding: ImportBinding,
   tail: readonly string[],
+  importerId: string,
+  options: ImportResolverOptions,
 ): unknown | null {
-  if (!isInkImportSource(binding.source)) {
+  if (!isInkImportSource(binding.source, importerId, options)) {
     return null;
   }
 
@@ -634,15 +734,12 @@ function resolveStaticInkImport(
   return tail.length > 0 ? readMemberPath(importedValue, tail) : importedValue;
 }
 
-function hasInkImport(code: string): boolean {
-  for (const source of INK_IMPORT_SOURCES) {
-    if (
-      code.includes(`from "${source}"`) || code.includes(`from '${source}'`)
-    ) {
-      return true;
-    }
-  }
-  return false;
+function hasInkImport(
+  moduleInfo: ModuleStaticInfo,
+  importerId: string,
+  options: ImportResolverOptions,
+): boolean {
+  return getInkDefaultImportNames(moduleInfo, importerId, options).size > 0;
 }
 
 function isVirtualSubRequest(id: string): boolean {
@@ -902,6 +999,19 @@ function parseModuleStaticInfo(code: string): ModuleStaticInfo {
     });
   }
 
+  const mixedNamespaceImportMatcher =
+    /import\s+(?!type\b)[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*\*\s*as\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*from\s*["']([^"']+)["']/g;
+  for (
+    let match = mixedNamespaceImportMatcher.exec(code);
+    match;
+    match = mixedNamespaceImportMatcher.exec(code)
+  ) {
+    imports.set(match[1], {
+      source: match[2],
+      kind: "namespace",
+    });
+  }
+
   const namespaceImportMatcher =
     /import\s*\*\s*as\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*from\s*["']([^"']+)["']/g;
   for (
@@ -913,6 +1023,23 @@ function parseModuleStaticInfo(code: string): ModuleStaticInfo {
       source: match[2],
       kind: "namespace",
     });
+  }
+
+  const mixedNamedImportMatcher =
+    /import\s+(?!type\b)[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*{([\s\S]*?)}\s*from\s*["']([^"']+)["']/g;
+  for (
+    let match = mixedNamedImportMatcher.exec(code);
+    match;
+    match = mixedNamedImportMatcher.exec(code)
+  ) {
+    const source = match[2];
+    for (const binding of parseBindingList(match[1])) {
+      imports.set(binding.local, {
+        source,
+        kind: "named",
+        imported: binding.imported,
+      });
+    }
   }
 
   const importMatcher = /import\s*{([\s\S]*?)}\s*from\s*["']([^"']+)["']/g;
@@ -1263,6 +1390,10 @@ function findProjectRoot(searchStart: string): string {
 
 function findTsconfigPath(searchStart: string): string | null {
   return findFileUpwards(searchStart, ["tsconfig.json"]);
+}
+
+function findDenoConfigPath(searchStart: string): string | null {
+  return findFileUpwards(searchStart, ["deno.json", "deno.jsonc"]);
 }
 
 function extractDefaultExportExpression(source: string): string | null {
@@ -1928,7 +2059,17 @@ function loadInkConfig(
       if (resolved === null) {
         const binding = moduleInfo.imports.get(head);
         if (binding) {
-          resolved = resolveStaticInkImport(binding, tail);
+          resolved = resolveStaticInkImport(
+            binding,
+            tail,
+            moduleId,
+            {
+              projectRoot: resolverOptions.projectRoot,
+              viteRoot: resolverOptions.viteRoot,
+              viteAliases: resolverOptions.viteAliases,
+              tsconfigResolver: resolverOptions.tsconfigResolver,
+            },
+          );
           if (resolved === null) {
             const resolvedImportFile = resolveImportToFile(
               moduleId,
@@ -2294,13 +2435,18 @@ function astIdentifierText(node: unknown): string | null {
   return null;
 }
 
-function isInkIdentifier(node: unknown): boolean {
-  return astIdentifierText(node) === "ink";
+function resolveInkIdentifierName(
+  node: unknown,
+  inkIdentifiers: ReadonlySet<string>,
+): string | null {
+  const identifier = astIdentifierText(node);
+  return identifier && inkIdentifiers.has(identifier) ? identifier : null;
 }
 
 function isInkObjectCall(
   node: unknown,
   typescript: TypeScriptAstApi,
+  inkIdentifiers: ReadonlySet<string>,
 ): node is { expression: unknown; arguments: unknown[]; end: number } {
   const syntaxKind = typescript.SyntaxKind;
   if (
@@ -2312,7 +2458,7 @@ function isInkObjectCall(
 
   const call = node as { expression?: unknown; arguments?: unknown[] };
   return Boolean(
-    isInkIdentifier(call.expression) &&
+    resolveInkIdentifierName(call.expression, inkIdentifiers) &&
       Array.isArray(call.arguments) &&
       call.arguments.length > 0 &&
       (call.arguments[0] as { kind?: number } | undefined)?.kind ===
@@ -2323,6 +2469,7 @@ function isInkObjectCall(
 function isNewInkBuilder(
   node: unknown,
   typescript: TypeScriptAstApi,
+  inkIdentifiers: ReadonlySet<string>,
 ): node is { expression: unknown; arguments?: unknown[]; end: number } {
   const syntaxKind = typescript.SyntaxKind;
   if (
@@ -2334,7 +2481,8 @@ function isNewInkBuilder(
 
   const expression = (node as { expression?: unknown }).expression;
   const args = (node as { arguments?: unknown[] }).arguments;
-  return isInkIdentifier(expression) && (args?.length ?? 0) <= 1;
+  return resolveInkIdentifierName(expression, inkIdentifiers) !== null &&
+    (args?.length ?? 0) <= 1;
 }
 
 function addScopeBinding(
@@ -2409,6 +2557,7 @@ function resolveBuilderDeclaration(
 function collectAstTransformTargets(
   code: string,
   id: string,
+  inkIdentifierNames: Iterable<string>,
 ): AstTransformTargets | null {
   const typescript = getTypeScriptAstApi();
   if (!typescript) {
@@ -2425,12 +2574,24 @@ function collectAstTransformTargets(
     scriptKindForModule(ast, normalizedId),
   ) as Record<string, unknown>;
   const syntaxKind = ast.SyntaxKind;
+  const inkIdentifiers = new Set(inkIdentifierNames);
+  if (inkIdentifiers.size === 0) {
+    return {
+      calls: [],
+      newInkDecls: [],
+    };
+  }
   const calls: AstInkCall[] = [];
   const newInkDecls: AstNewInkDeclaration[] = [];
 
   function recordInkCall(node: unknown): void {
-    if (isInkObjectCall(node, ast)) {
+    if (isInkObjectCall(node, ast, inkIdentifiers)) {
+      const callee = resolveInkIdentifierName(node.expression, inkIdentifiers);
+      if (!callee) {
+        return;
+      }
       calls.push({
+        callee,
         start: astNodeStart(node, sourceFile),
         end: astNodeEnd(node),
         arg: astNodeText(node.arguments[0], code, sourceFile),
@@ -2456,8 +2617,16 @@ function collectAstTransformTargets(
       return;
     }
 
-    if (isNewInkBuilder(declarationNode.initializer, ast)) {
+    if (isNewInkBuilder(declarationNode.initializer, ast, inkIdentifiers)) {
       const initializerArgs = declarationNode.initializer.arguments ?? [];
+      const constructorName = resolveInkIdentifierName(
+        declarationNode.initializer.expression,
+        inkIdentifiers,
+      );
+      if (!constructorName) {
+        scope.set(name, null);
+        return;
+      }
       const optionsSource = initializerArgs.length > 0
         ? astNodeText(initializerArgs[0], code, sourceFile)
         : undefined;
@@ -2466,6 +2635,7 @@ function collectAstTransformTargets(
       ) ?? { simple: false };
       const builder: AstNewInkDeclaration = {
         varName: name,
+        constructorName,
         start: astNodeStart(declaration, sourceFile),
         initializerStart: astNodeStart(declarationNode.initializer, sourceFile),
         initializerEnd: astNodeEnd(declarationNode.initializer),
@@ -3705,6 +3875,38 @@ function applyViteAlias(source: string, alias: ViteAliasEntry): string | null {
   return source.replace(alias.find, alias.replacement);
 }
 
+function hasViteAliasForSource(
+  aliases: readonly ViteAliasEntry[],
+  source: string,
+): boolean {
+  return aliases.some((alias) => applyViteAlias(source, alias) !== null);
+}
+
+function getAutoDenoInkAliases(
+  root: string,
+  existingAlias: unknown,
+): ViteAliasEntry[] {
+  if (!INK_PACKAGE_NPM_NAME) {
+    return [];
+  }
+  if (!findDenoConfigPath(root) || findFileUpwards(root, ["package.json"])) {
+    return [];
+  }
+
+  const aliases = normalizeViteAliases(existingAlias);
+  const autoAliases: ViteAliasEntry[] = [];
+  for (const source of [INK_PACKAGE_NAME, `jsr:${INK_PACKAGE_NAME}`]) {
+    if (!hasViteAliasForSource(aliases, source)) {
+      autoAliases.push({
+        find: source,
+        replacement: INK_PACKAGE_NPM_NAME,
+      });
+    }
+  }
+
+  return autoAliases;
+}
+
 function resolveAliasedPath(
   importerId: string,
   source: string,
@@ -4190,6 +4392,24 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     name: "ink",
     enforce: "pre",
 
+    config(userConfig: ViteConfigLike) {
+      const root = typeof userConfig.root === "string"
+        ? getNodePath().resolve(userConfig.root)
+        : process.cwd();
+      const autoAliases = getAutoDenoInkAliases(
+        root,
+        userConfig.resolve?.alias,
+      );
+      if (autoAliases.length === 0) {
+        return null;
+      }
+      return {
+        resolve: {
+          alias: autoAliases,
+        },
+      };
+    },
+
     configureServer(devServer: ViteDevServerLike) {
       server = devServer;
     },
@@ -4256,18 +4476,38 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       const isSvelte = normalizedId.endsWith(".svelte");
       const isAstro = normalizedId.endsWith(".astro");
       let nextCode = code;
+      const importResolverOptions: ImportResolverOptions = {
+        projectRoot,
+        viteRoot,
+        viteAliases,
+        tsconfigResolver,
+      };
+      const currentModuleInfo = parseModuleStaticInfo(nextCode);
+      const inkDefaultImportNames = getInkDefaultImportNames(
+        currentModuleInfo,
+        normalizedId,
+        importResolverOptions,
+      );
+      const inkIdentifierNames = inkDefaultImportNames.size > 0
+        ? Array.from(inkDefaultImportNames)
+        : ["ink"];
 
-      if (!isSvelte && !isAstro && !hasInkImport(code)) {
+      if (
+        !isSvelte &&
+        !isAstro &&
+        !hasInkImport(currentModuleInfo, normalizedId, importResolverOptions)
+      ) {
         return null;
       }
 
       const astTargets = !isSvelte && !isAstro
-        ? collectAstTransformTargets(nextCode, normalizedId)
+        ? collectAstTransformTargets(nextCode, normalizedId, inkIdentifierNames)
         : null;
       const newInkDecls: AstNewInkDeclaration[] = astTargets?.newInkDecls ??
-        findNewInkDeclarations(nextCode).map((decl) => {
+        findNewInkDeclarations(nextCode, inkIdentifierNames).map((decl) => {
           return {
             varName: decl.varName,
+            constructorName: decl.constructorName,
             start: decl.start,
             initializerStart: decl.initializerStart,
             initializerEnd: decl.initializerEnd,
@@ -4281,7 +4521,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           };
         });
       const calls = astTargets?.calls ??
-        findInkCalls(nextCode).filter((call) =>
+        findInkCalls(nextCode, inkIdentifierNames).filter((call) =>
           !newInkDecls.some((decl) =>
             call.start >= decl.initializerStart &&
             call.end <= decl.initializerEnd
@@ -4329,7 +4569,9 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       }
       const runtimeOptionsLiteral = JSON.stringify(runtimeOptionsForRuntime);
       const shouldLogStatic = Boolean(server && inkConfig.debug.logStatic);
-      const moduleInfoCache = new Map<string, ModuleStaticInfo>();
+      const moduleInfoCache = new Map<string, ModuleStaticInfo>([
+        [normalizedId, currentModuleInfo],
+      ]);
       const constValueCache = new Map<string, unknown | null>();
       const resolving = new Set<string>();
       const staticDependencies = new Set<string>();
@@ -4358,9 +4600,10 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       }
 
       function withRuntimeOptionsInNewInkInitializer(
+        constructorName: string,
         optionsSource?: string,
       ): string {
-        return `new ink(${
+        return `new ${constructorName}(${
           optionsSource ?? "undefined"
         }, undefined, ${runtimeOptionsLiteral})`;
       }
@@ -4524,7 +4767,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           if (resolved === null) {
             const binding = moduleInfo.imports.get(head);
             if (binding) {
-              resolved = resolveStaticInkImport(binding, tail);
+              resolved = resolveStaticInkImport(
+                binding,
+                tail,
+                moduleId,
+                importResolverOptions,
+              );
               if (resolved === null) {
                 const resolvedImportFile = resolveImportToFile(
                   moduleId,
@@ -4631,7 +4879,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           replacements.push({
             start: call.start,
             end: call.end,
-            text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
+            text: `${call.callee}(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
           });
           continue;
         }
@@ -4655,14 +4903,14 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         if (!parsed) {
           if (resolution === "static") {
             throw staticResolutionError(
-              'resolution="static" could not statically resolve ink(...)',
+              `resolution="static" could not statically resolve ${call.callee}(...)`,
               call.start,
             );
           }
           replacements.push({
             start: call.start,
             end: call.end,
-            text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
+            text: `${call.callee}(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
           });
           continue;
         }
@@ -4812,7 +5060,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         }
 
         const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-        const replacement = `ink(${runtimeConfigLiteral}, ${
+        const replacement = `${call.callee}(${runtimeConfigLiteral}, ${
           JSON.stringify(compiledConfig)
         }, ${runtimeOptionsLiteral})`;
         replacements.push({
@@ -4837,6 +5085,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           resolvedBuilderOptionsValue,
         ) ?? { simple: decl.simple };
         const runtimeDeclaration = withRuntimeOptionsInNewInkInitializer(
+          decl.constructorName,
           decl.optionsSource,
         );
 
@@ -4885,13 +5134,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         let allParsed = true;
 
         for (const assignment of decl.assignments) {
-          let value = parseStaticExpression(assignment.valueSource) ??
-            parseStaticExpression(
-              assignment.valueSource,
-              (identifierPath) =>
-                resolveIdentifierInModule(identifierPath, normalizedId) ??
-                  undefined,
-            );
+          let value = parseStaticExpression(
+            assignment.valueSource,
+            (identifierPath) =>
+              resolveIdentifierInModule(identifierPath, normalizedId) ??
+                undefined,
+          ) ?? parseStaticExpression(assignment.valueSource);
           if (value === null) {
             const moduleInfo = getModuleInfo(normalizedId);
             if (moduleInfo) {
@@ -5252,7 +5500,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         }
 
         const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-        const inkCall = `ink(${runtimeConfigLiteral}, ${
+        const inkCall = `${decl.constructorName}(${runtimeConfigLiteral}, ${
           JSON.stringify(compiledConfig)
         }, ${runtimeOptionsLiteral})`;
         replacements.push({
