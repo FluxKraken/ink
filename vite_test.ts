@@ -760,6 +760,29 @@ Deno.test("toCssDeclaration quotes string content values and preserves raw conte
   );
 });
 
+Deno.test("toCssDeclaration quotes grid template area rows", () => {
+  assertEquals(
+    toCssDeclaration("gridTemplateAreas", [
+      ". header .",
+      ". content .",
+      ". footer .",
+    ]),
+    `grid-template-areas:". header ." ". content ." ". footer ."`,
+  );
+  assertEquals(
+    toCssDeclaration("gridTemplateAreas", "none"),
+    "grid-template-areas:none",
+  );
+  assertEquals(
+    toCssDeclaration("gridTemplateAreas", `"header header" "content footer"`),
+    `grid-template-areas:"header header" "content footer"`,
+  );
+  assertEquals(
+    toCssDeclaration("gridTemplateAreas", cVar("--page-areas")),
+    "grid-template-areas:var(--page-areas)",
+  );
+});
+
 Deno.test("toCssRules serializes empty content strings in pseudo elements", () => {
   assertEquals(
     toCssRules("test", {
@@ -2287,6 +2310,36 @@ Deno.test("extracts space-delimited property arrays at build time", () => {
   assertMatch(
     css,
     /\.ink_[a-z0-9]+\{display:grid;grid-template-rows:auto 1fr auto\}/,
+  );
+});
+
+Deno.test("extracts grid-template-areas arrays as quoted rows at build time", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const moduleCode = `import ink from "@kraken/ink";\n` +
+    `export const styles = ink({\n` +
+    `  base: {\n` +
+    `    pageWrapper: {\n` +
+    `      display: "grid",\n` +
+    `      gridTemplateAreas: [\n` +
+    `        ". header .",\n` +
+    `        ". content .",\n` +
+    `        ". footer .",\n` +
+    `      ],\n` +
+    `    }\n` +
+    `  }\n` +
+    `});`;
+  const transformed = transform(moduleCode, "/app/src/lib/grid-areas.ts");
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{display:grid;grid-template-areas:"\. header \." "\. content \." "\. footer \."\}/,
   );
 });
 

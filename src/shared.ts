@@ -1424,6 +1424,10 @@ function formatPrimitiveStyleValue(
     return formatContentValue(value);
   }
 
+  if (property === "grid-template-areas" && typeof value === "string") {
+    return formatGridTemplateAreasValue(value);
+  }
+
   if (typeof value === "string" && shouldAutoWrapImageValue(property, value)) {
     return formatCssImageUrl(value);
   }
@@ -1460,6 +1464,28 @@ function formatContentValue(value: string): string {
   if (
     isQuotedCssString(value) || RAW_CONTENT_KEYWORDS.has(value) ||
     isRawContentFunction(value)
+  ) {
+    return value;
+  }
+
+  return JSON.stringify(value);
+}
+
+const RAW_GRID_TEMPLATE_AREAS_KEYWORDS = new Set([
+  "none",
+  "inherit",
+  "initial",
+  "revert",
+  "revert-layer",
+  "unset",
+]);
+
+function formatGridTemplateAreasValue(value: string): string {
+  const trimmed = value.trim();
+  if (
+    isQuotedCssString(trimmed) ||
+    RAW_GRID_TEMPLATE_AREAS_KEYWORDS.has(trimmed) ||
+    trimmed.startsWith("var(")
   ) {
     return value;
   }
