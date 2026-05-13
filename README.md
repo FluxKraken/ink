@@ -495,6 +495,48 @@ styles.import({
 });
 ```
 
+Tailwind CSS setup can also live in an imported TypeScript object. Ink emits the
+equivalent Tailwind CSS directives into the virtual stylesheet, keeping package
+imports at the top so Tailwind can process them.
+
+```ts
+import ink, { type TailwindConfigInput, tw } from "@kraken/ink";
+
+const tailwind: TailwindConfigInput = {
+  import: ["tailwindcss", "tw-animate-css", "shadcn/tailwind.css"],
+  customVariant: {
+    dark: "&:is(.dark *)",
+  },
+  themeInline: {
+    "--font-sans": "'Inter Variable', sans-serif",
+    "--color-background": "var(--background)",
+  },
+  root: {
+    "--background": "oklch(1 0 0)",
+  },
+  ".dark": {
+    "--background": "oklch(0.145 0 0)",
+  },
+  layer: {
+    base: {
+      "*": {
+        "@apply": tw("border-border outline-ring/50"),
+        boxSizing: "border-box",
+      },
+      body: tw("bg-background text-foreground"),
+    },
+  },
+  utility: {
+    "tab-*": {
+      tabSize: "--value(--tab-size-*)",
+    },
+  },
+};
+
+const styles = new ink();
+styles.import({ tailwind });
+```
+
 ### Root variables
 
 Use `root` for explicit custom properties, optionally under a CSS layer.

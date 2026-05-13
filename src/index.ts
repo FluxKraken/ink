@@ -12,6 +12,7 @@ import { inkVite } from "./vite.js";
 import { cVar, font, Theme, tVar, tw } from "./shared.js";
 
 type Ink = typeof runtimeInk & {
+  (input: Parameters<typeof tw>[0]): ReturnType<typeof tw>;
   new (): InkBuilder;
   new (options: InkBuilderOptions & { simple: true }): InkSimpleBuilder;
   vite: typeof inkVite;
@@ -76,6 +77,10 @@ export type { ApplyInput } from "./shared.js";
 export type { SetInput } from "./shared.js";
 /** Valid input for importing external styles or global style objects. */
 export type { ImportInput } from "./shared.js";
+/** Tailwind CSS config object accepted by `.import({ tailwind })`. */
+export type { TailwindConfigInput } from "./shared.js";
+/** Tailwind CSS import entries accepted by `TailwindConfigInput.import`. */
+export type { TailwindConfigImportInput } from "./shared.js";
 /** Tailwind class marker returned by `tw(...)`. */
 export type { TailwindClassValue } from "./shared.js";
 /** Input accepted by `tw(...)`. */

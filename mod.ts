@@ -42,6 +42,12 @@ export type { FontHelper } from "./src/index.ts";
 export type { ApplyInput } from "./src/index.ts";
 /** Input accepted by the `@set` directive. */
 export type { SetInput } from "./src/index.ts";
+/** Valid input for importing external styles or global style objects. */
+export type { ImportInput } from "./src/index.ts";
+/** Tailwind CSS config object accepted by `.import({ tailwind })`. */
+export type { TailwindConfigInput } from "./src/index.ts";
+/** Tailwind CSS import entries accepted by `TailwindConfigInput.import`. */
+export type { TailwindConfigImportInput } from "./src/index.ts";
 /** Tailwind class marker returned by `tw(...)`. */
 export type { TailwindClassValue } from "./src/index.ts";
 /** Input accepted by `tw(...)`. */

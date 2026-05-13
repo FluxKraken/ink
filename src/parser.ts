@@ -12,6 +12,8 @@ import {
   type StyleSheet,
   type StyleValue,
   type TailwindClassValue,
+  type TailwindConfigInput,
+  tailwindConfigToCss,
   Theme,
   type ThemeMode,
   toFontVarName,
@@ -54,6 +56,8 @@ type InkConfig = {
   variant?: VariantSheet;
   variantGlobal?: VariantGlobalSheet;
   defaults?: VariantSelection;
+  tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
+  tailwindCss?: string[];
 };
 
 type RootVarEntry =
@@ -1389,6 +1393,46 @@ function normalizeFonts(
   }
 }
 
+function normalizeTailwindConfigs(
+  value: unknown,
+): { imports: string[]; css: string[] } | null {
+  const entries = Array.isArray(value) ? value : [value];
+  const imports: string[] = [];
+  const css: string[] = [];
+
+  try {
+    for (const entry of entries) {
+      const resolved = tailwindConfigToCss(entry as TailwindConfigInput);
+      imports.push(...resolved.imports);
+      css.push(...resolved.css);
+    }
+  } catch {
+    return null;
+  }
+
+  return {
+    imports: Array.from(new Set(imports)),
+    css,
+  };
+}
+
+function normalizeRawCss(value: unknown): string[] | null {
+  const entries = Array.isArray(value) ? value : [value];
+  const css: string[] = [];
+
+  for (const entry of entries) {
+    if (typeof entry !== "string") {
+      return null;
+    }
+    const trimmed = entry.trim();
+    if (trimmed.length > 0) {
+      css.push(trimmed);
+    }
+  }
+
+  return css;
+}
+
 function toThemeScopeSelector(scope: string): string | null {
   const trimmed = scope.trim();
   if (
@@ -1685,7 +1729,7 @@ function normalizeVariantSelection(
 /**
  * Validate and normalize a parsed config object into a {@link InkConfig}.
  * Allowed top-level keys: `simple`, `global`, `themes`, `fonts`, `root`,
- * `rootVars`, `base`, `variant`, `defaults`.
+ * `rootVars`, `base`, `variant`, `defaults`, `tailwind`, `tailwindCss`.
  * Returns `null` when the input cannot be validated.
  */
 export function parseInkConfig(
@@ -1702,6 +1746,8 @@ export function parseInkConfig(
     "base",
     "variant",
     "defaults",
+    "tailwind",
+    "tailwindCss",
   ]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
@@ -1726,6 +1772,7 @@ export function parseInkConfig(
   let variant: VariantSheet | undefined;
   let variantGlobal: VariantGlobalSheet | undefined;
   let defaults: VariantSelection | undefined;
+  let tailwindCss: string[] | undefined;
   const rootEntries: RootVarEntry[] = [];
 
   if ("themes" in value) {
@@ -1751,6 +1798,35 @@ export function parseInkConfig(
       imports.add(importPath);
     }
     rootEntries.push(...normalizedFonts.root);
+  }
+
+  if ("tailwind" in value) {
+    const normalizedTailwind = normalizeTailwindConfigs(value.tailwind);
+    if (!normalizedTailwind) {
+      return null;
+    }
+    for (const importPath of normalizedTailwind.imports) {
+      imports.add(importPath);
+    }
+    if (normalizedTailwind.css.length > 0) {
+      tailwindCss = [
+        ...(tailwindCss ?? []),
+        ...normalizedTailwind.css,
+      ];
+    }
+  }
+
+  if ("tailwindCss" in value) {
+    const normalizedCss = normalizeRawCss(value.tailwindCss);
+    if (!normalizedCss) {
+      return null;
+    }
+    if (normalizedCss.length > 0) {
+      tailwindCss = [
+        ...(tailwindCss ?? []),
+        ...normalizedCss,
+      ];
+    }
   }
 
   if ("global" in value) {
@@ -1827,6 +1903,7 @@ export function parseInkConfig(
     variant,
     variantGlobal,
     defaults,
+    tailwindCss,
   };
 }
 

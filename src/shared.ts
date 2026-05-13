@@ -170,12 +170,51 @@ export interface ImportPathObject {
   layer?: string;
 }
 
+/** Import entries accepted by a Tailwind CSS config object. */
+export type TailwindConfigImportInput =
+  | string
+  | ImportPathObject
+  | readonly (string | ImportPathObject)[];
+
+/** Tailwind CSS directives and global rules emitted into the Ink stylesheet. */
+export interface TailwindConfigInput {
+  /** Package or stylesheet imports emitted as top-level `@import` rules. */
+  import?: TailwindConfigImportInput;
+  /** `@custom-variant` entries, for example `{ dark: "&:is(.dark *)" }`. */
+  customVariant?: Record<string, string>;
+  /** CSS custom properties emitted in `@theme`. */
+  theme?: Record<string, StyleValue>;
+  /** CSS custom properties emitted in `@theme inline`. */
+  themeInline?: Record<string, StyleValue>;
+  /** Layered global rules emitted as `@layer <name> { ... }`. */
+  layer?: Record<string, Record<string, unknown>>;
+  /** Custom utilities emitted as `@utility <name> { ... }`. */
+  utility?: Record<string, Record<string, unknown> | TailwindClassValue>;
+  /** Additional top-level selectors or at-rules, such as `".dark"`. */
+  [key: string]: unknown;
+}
+
+/** Wrapper accepted by `.import()` for Tailwind CSS config objects. */
+export interface ImportTailwindObject {
+  /** Tailwind CSS config object to serialize into the virtual stylesheet. */
+  tailwind: TailwindConfigInput;
+}
+
+/** Serialized Tailwind CSS pieces split so imports can stay at the CSS top. */
+export interface ResolvedTailwindConfigCss {
+  /** Quoted `@import` specifiers consumed by the runtime/Vite CSS pipeline. */
+  imports: string[];
+  /** Non-import Tailwind CSS directives and global rules. */
+  css: string[];
+}
+
 /** Singular import input item. */
 export type SingularImportInput =
   | string
   | StyleSheet
   | ImportPathObject
-  | ImportRuleObject;
+  | ImportRuleObject
+  | ImportTailwindObject;
 
 /** Import shapes accepted by the `.import()` method. */
 export type ImportInput = SingularImportInput | readonly SingularImportInput[];
@@ -1336,6 +1375,246 @@ export function toCssLayerOrderRule(
   );
 
   return `${statement}${fallbackBlocks}`;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    !isCssVarRef(value);
+}
+
+function toQuotedImportSpecifier(path: string): string {
+  const trimmed = path.trim();
+  if (trimmed.length === 0) {
+    throw new Error("Tailwind import paths must not be empty.");
+  }
+  if (/^["'][\s\S]*["'](?:\s+layer\([^)]+\))?$/.test(trimmed)) {
+    return trimmed;
+  }
+  return JSON.stringify(trimmed);
+}
+
+function normalizeTailwindImportEntry(entry: unknown): string {
+  if (typeof entry === "string") {
+    return toQuotedImportSpecifier(entry);
+  }
+
+  if (isPlainRecord(entry) && typeof entry.path === "string") {
+    const importPath = toQuotedImportSpecifier(entry.path);
+    const layer = typeof entry.layer === "string" ? entry.layer.trim() : "";
+    return layer.length > 0 ? `${importPath} layer(${layer})` : importPath;
+  }
+
+  throw new Error(
+    "Tailwind import entries must be strings or { path, layer? } objects.",
+  );
+}
+
+function normalizeTailwindImportInput(value: unknown): string[] {
+  const entries = Array.isArray(value) ? value : [value];
+  return Array.from(new Set(entries.map(normalizeTailwindImportEntry)));
+}
+
+function tailwindClassListToCss(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : "";
+  }
+
+  if (isTailwindClassValue(value)) {
+    return value.classNames
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .join(" ");
+  }
+
+  if (Array.isArray(value)) {
+    const parts: string[] = [];
+    for (const entry of value) {
+      const resolved = tailwindClassListToCss(entry);
+      if (resolved === null) {
+        return null;
+      }
+      if (resolved.length > 0) {
+        parts.push(resolved);
+      }
+    }
+    return parts.join(" ");
+  }
+
+  return null;
+}
+
+function toTailwindDeclarationBlock(value: unknown): string {
+  if (isTailwindClassValue(value)) {
+    const classList = tailwindClassListToCss(value);
+    return classList && classList.length > 0 ? `@apply ${classList};` : "";
+  }
+
+  if (!isPlainRecord(value)) {
+    throw new Error(
+      "Tailwind CSS rule blocks must be objects or tw(...) values.",
+    );
+  }
+
+  const parts: string[] = [];
+  for (const [name, declarationValue] of Object.entries(value)) {
+    if (name === "@apply") {
+      const classList = tailwindClassListToCss(declarationValue);
+      if (classList === null) {
+        throw new Error(
+          'Tailwind "@apply" values must be strings, tw(...) values, or arrays of those.',
+        );
+      }
+      if (classList.length > 0) {
+        parts.push(`@apply ${classList};`);
+      }
+      continue;
+    }
+
+    if (isThemeStyleValue(declarationValue)) {
+      parts.push(`${toCssDeclaration(name, declarationValue)};`);
+      continue;
+    }
+
+    if (
+      isPlainRecord(declarationValue) || isTailwindClassValue(declarationValue)
+    ) {
+      parts.push(`${name}{${toTailwindDeclarationBlock(declarationValue)}}`);
+      continue;
+    }
+
+    throw new Error(
+      `Tailwind CSS property "${name}" must be a CSS value, nested rule, or tw(...) value.`,
+    );
+  }
+
+  return parts.join("");
+}
+
+function toTailwindRule(selector: string, declaration: unknown): string {
+  const trimmedSelector = selector.trim();
+  if (trimmedSelector.length === 0) {
+    throw new Error("Tailwind CSS selectors must not be empty.");
+  }
+  return `${trimmedSelector}{${toTailwindDeclarationBlock(declaration)}}`;
+}
+
+function toTailwindRuleMap(value: unknown): string {
+  if (!isPlainRecord(value)) {
+    throw new Error("Tailwind CSS rule maps must be objects.");
+  }
+  return Object.entries(value)
+    .map(([selector, declaration]) => toTailwindRule(selector, declaration))
+    .join("");
+}
+
+function toTailwindCustomVariantRules(value: unknown): string[] {
+  if (!isPlainRecord(value)) {
+    throw new Error("customVariant must be an object.");
+  }
+
+  const rules: string[] = [];
+  for (const [name, selector] of Object.entries(value)) {
+    const variantName = name.trim();
+    if (variantName.length === 0 || typeof selector !== "string") {
+      throw new Error("customVariant entries must map names to selectors.");
+    }
+    const trimmedSelector = selector.trim();
+    if (trimmedSelector.length === 0) {
+      throw new Error("customVariant selectors must not be empty.");
+    }
+    rules.push(`@custom-variant ${variantName} (${trimmedSelector});`);
+  }
+  return rules;
+}
+
+function toTailwindLayerRules(value: unknown): string[] {
+  if (!isPlainRecord(value)) {
+    throw new Error("layer must be an object.");
+  }
+
+  const rules: string[] = [];
+  for (const [layerName, layerRules] of Object.entries(value)) {
+    const normalizedLayer = layerName.trim();
+    if (normalizedLayer.length === 0) {
+      throw new Error("Tailwind layer names must not be empty.");
+    }
+    rules.push(`@layer ${normalizedLayer}{${toTailwindRuleMap(layerRules)}}`);
+  }
+  return rules;
+}
+
+function toTailwindUtilityRules(value: unknown): string[] {
+  if (!isPlainRecord(value)) {
+    throw new Error("utility must be an object.");
+  }
+
+  const rules: string[] = [];
+  for (const [utilityName, declaration] of Object.entries(value)) {
+    const normalizedUtility = utilityName.trim();
+    if (normalizedUtility.length === 0) {
+      throw new Error("Tailwind utility names must not be empty.");
+    }
+    rules.push(
+      `@utility ${normalizedUtility}{${
+        toTailwindDeclarationBlock(declaration)
+      }}`,
+    );
+  }
+  return rules;
+}
+
+/**
+ * Serialize an Ink Tailwind config object into CSS that Tailwind can process.
+ * Imports are returned separately so callers can emit all `@import` rules first.
+ */
+export function tailwindConfigToCss(
+  config: TailwindConfigInput,
+): ResolvedTailwindConfigCss {
+  if (!isPlainRecord(config)) {
+    throw new Error("tailwind config imports must be objects.");
+  }
+
+  const imports: string[] = [];
+  const css: string[] = [];
+
+  for (const [key, value] of Object.entries(config)) {
+    if (key === "import") {
+      imports.push(...normalizeTailwindImportInput(value));
+      continue;
+    }
+    if (key === "customVariant") {
+      css.push(...toTailwindCustomVariantRules(value));
+      continue;
+    }
+    if (key === "theme") {
+      css.push(`@theme{${toTailwindDeclarationBlock(value)}}`);
+      continue;
+    }
+    if (key === "themeInline") {
+      css.push(`@theme inline{${toTailwindDeclarationBlock(value)}}`);
+      continue;
+    }
+    if (key === "layer") {
+      css.push(...toTailwindLayerRules(value));
+      continue;
+    }
+    if (key === "utility") {
+      css.push(...toTailwindUtilityRules(value));
+      continue;
+    }
+    if (key === "root") {
+      css.push(toTailwindRule(":root", value));
+      continue;
+    }
+
+    css.push(toTailwindRule(key, value));
+  }
+
+  return {
+    imports: Array.from(new Set(imports)),
+    css,
+  };
 }
 
 /** Convert `root`/`rootVars` inputs into global `:root` rules. */

@@ -14,6 +14,8 @@ import {
   StyleValue,
   TailwindClassInput,
   TailwindClassValue,
+  TailwindConfigImportInput,
+  TailwindConfigInput,
   Theme,
   ThemeTokenInput,
   tw,
@@ -56,6 +58,8 @@ type InkConfig<
   root?: readonly RootVarInput[];
   /** @deprecated Use `root` instead. */
   rootVars?: readonly RootVarInput[];
+  tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
+  tailwindCss?: readonly string[];
   base?: T;
   variant?: V;
   defaults?: VariantSelection<V>;
@@ -73,6 +77,8 @@ type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   root?: readonly RootVarInput[];
   /** @deprecated Use `root` instead. */
   rootVars?: readonly RootVarInput[];
+  tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
+  tailwindCss?: readonly string[];
   base?: StyleDeclarationInput;
   variant?: V;
   defaults?: SimpleVariantSelection<V>;
@@ -202,6 +208,10 @@ export type { SetInput };
 export type { TailwindClassValue };
 /** Input accepted by `tw(...)`. */
 export type { TailwindClassInput };
+/** Tailwind CSS config object accepted by `.import({ tailwind })`. */
+export type { TailwindConfigInput };
+/** Tailwind CSS import entries accepted by `TailwindConfigInput.import`. */
+export type { TailwindConfigImportInput };
 /** Layered `@apply` helper object. */
 export type { LayeredApplyInput };
 /** Object form accepted by the `@set` directive. */
@@ -230,6 +240,7 @@ export interface Ink {
     compiled?: CompiledConfig<Record<string, StyleDeclarationInput>>,
     runtimeOptions?: InkRuntimeOptions,
   ): InkSimpleStyleAccessor<V>;
+  (input: TailwindClassInput): TailwindClassValue;
   new <
     T extends StyleSheetInput = StyleSheetInput,
     V extends VariantSheet<T> | undefined = VariantSheet<T> | undefined,

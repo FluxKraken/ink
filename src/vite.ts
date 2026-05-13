@@ -4651,6 +4651,14 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           compiledConfig.imports = true;
         }
 
+        if ((parsed.tailwindCss?.length ?? 0) > 0) {
+          for (const cssBlock of parsed.tailwindCss ?? []) {
+            rules.add(cssBlock);
+          }
+          compiledConfig.global = true;
+          logStatic(`tailwind css blocks: ${parsed.tailwindCss!.length}`);
+        }
+
         const extractedGlobalRules = {
           ...rootVarsToGlobalRules(parsed.root ?? parsed.rootVars),
           ...(parsed.global ?? {}),
@@ -4991,8 +4999,10 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         }
 
         if (importParts.length > 0) {
-          configParts.global = configParts.global ?? {};
-          const currentGlobal = configParts.global as Record<string, unknown>;
+          const ensureGlobal = (): Record<string, unknown> => {
+            configParts.global = configParts.global ?? {};
+            return configParts.global as Record<string, unknown>;
+          };
 
           for (const entryGroup of importParts) {
             const entries = Array.isArray(entryGroup)
@@ -5000,9 +5010,26 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               : [entryGroup];
             for (const entry of entries) {
               if (
+                typeof entry === "object" && entry !== null &&
+                !Array.isArray(entry) && "tailwind" in entry
+              ) {
+                const currentTailwind = configParts.tailwind;
+                configParts.tailwind = currentTailwind === undefined
+                  ? (entry as { tailwind: unknown }).tailwind
+                  : [
+                    ...(Array.isArray(currentTailwind)
+                      ? currentTailwind
+                      : [currentTailwind]),
+                    (entry as { tailwind: unknown }).tailwind,
+                  ];
+                continue;
+              }
+
+              if (
                 typeof entry === "string" ||
                 (typeof entry === "object" && entry !== null && "path" in entry)
               ) {
+                const currentGlobal = ensureGlobal();
                 currentGlobal["@import"] = currentGlobal["@import"] ?? [];
                 if (Array.isArray(currentGlobal["@import"])) {
                   currentGlobal["@import"].push(entry);
@@ -5013,13 +5040,16 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                 if ("rules" in entry) {
                   const ruleObj = entry as { layer?: string; rules: unknown };
                   if (ruleObj.layer && typeof ruleObj.layer === "string") {
+                    const currentGlobal = ensureGlobal();
                     currentGlobal[`@layer ${ruleObj.layer}`] = ruleObj.rules;
                   } else if (
                     ruleObj.rules && typeof ruleObj.rules === "object"
                   ) {
+                    const currentGlobal = ensureGlobal();
                     Object.assign(currentGlobal, ruleObj.rules);
                   }
                 } else {
+                  const currentGlobal = ensureGlobal();
                   Object.assign(currentGlobal, entry);
                 }
               }
@@ -5089,6 +5119,14 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         const compiledConfig: Record<string, unknown> = {};
         if ((parsed.imports?.length ?? 0) > 0) {
           compiledConfig.imports = true;
+        }
+
+        if ((parsed.tailwindCss?.length ?? 0) > 0) {
+          for (const cssBlock of parsed.tailwindCss ?? []) {
+            rules.add(cssBlock);
+          }
+          compiledConfig.global = true;
+          logStatic(`tailwind css blocks: ${parsed.tailwindCss!.length}`);
         }
 
         const extractedGlobalRules = {

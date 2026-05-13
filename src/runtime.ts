@@ -13,7 +13,10 @@ import {
   StyleDeclaration,
   StyleSheet,
   StyleValue,
+  TailwindClassInput,
   TailwindClassValue,
+  TailwindConfigInput,
+  tailwindConfigToCss,
   type ThemeMode,
   themesToConfig,
   toCssDeclaration,
@@ -21,6 +24,7 @@ import {
   toCssLayerOrderRule,
   toCssRules,
   toTailwindVariantForNestedKey,
+  tw,
 } from "./shared.js";
 
 /** A style declaration or recursive array of declarations (merged left-to-right). */
@@ -94,6 +98,10 @@ type InkConfig<
   variantGlobal?: VariantGlobalSheet;
   /** Default variant selections. */
   defaults?: VariantSelection<V>;
+  /** Tailwind CSS config objects emitted into the global stylesheet. */
+  tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
+  /** Pre-serialized Tailwind CSS emitted into the global stylesheet. */
+  tailwindCss?: readonly string[];
 };
 type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   /** Enable the single-slot shorthand mode. */
@@ -114,6 +122,10 @@ type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   variant?: V;
   /** Default variant selections. */
   defaults?: SimpleVariantSelection<V>;
+  /** Tailwind CSS config objects emitted into the global stylesheet. */
+  tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
+  /** Pre-serialized Tailwind CSS emitted into the global stylesheet. */
+  tailwindCss?: readonly string[];
 };
 /** Build-time precompiled config passed as the second argument to `ink()`. */
 type CompiledConfig<T extends StyleSheetInput> = {
@@ -984,6 +996,26 @@ function compileAccessorFactory<
   for (const importPath of importedFonts.imports) {
     imports.add(importPath);
   }
+  const tailwindCss: string[] = [];
+  if (config.tailwind) {
+    const tailwindConfigs = Array.isArray(config.tailwind)
+      ? config.tailwind
+      : [config.tailwind];
+    for (const tailwindConfig of tailwindConfigs) {
+      const resolvedTailwind = tailwindConfigToCss(tailwindConfig);
+      for (const importPath of resolvedTailwind.imports) {
+        imports.add(importPath);
+      }
+      tailwindCss.push(...resolvedTailwind.css);
+    }
+  }
+  if (config.tailwindCss) {
+    tailwindCss.push(
+      ...config.tailwindCss
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0),
+    );
+  }
   const rootVarStyles = rootVarsToGlobalRules([
     ...importedThemes.root,
     ...importedFonts.root,
@@ -1056,6 +1088,20 @@ function compileAccessorFactory<
     for (const selector of Object.keys(globalStyles)) {
       log("static", `global selector: ${selector}`);
     }
+  }
+
+  if (tailwindCss.length > 0 && !effectiveCompiled?.global) {
+    if (resolution === "static") {
+      throw new Error(
+        'ink resolution="static" requires Tailwind CSS config to be statically extracted.',
+      );
+    }
+    for (const rule of tailwindCss) {
+      injectRule(rule);
+      log("dynamic", `tailwind css injected: ${rule}`);
+    }
+  } else if (tailwindCss.length > 0) {
+    log("static", `tailwind css blocks: ${tailwindCss.length}`);
   }
 
   const variantGlobalRules: string[] = [];
@@ -1358,6 +1404,8 @@ function compileSimpleConfig<V extends SimpleVariantSheet | undefined>(
     defaults: config.defaults as VariantSelection<
       VariantSheet<Record<string, StyleDeclarationInput>> | undefined
     >,
+    tailwind: config.tailwind,
+    tailwindCss: config.tailwindCss,
   };
   const factory = compileAccessorFactory(
     wrappedConfig,
@@ -1416,6 +1464,26 @@ const CONFIG_KEYS = new Set([
 
 function normalizeConfigKey(key: string): string {
   return key === "rootVars" ? "root" : key;
+}
+
+function isTailwindImportObject(
+  value: unknown,
+): value is import("./shared.js").ImportTailwindObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    "tailwind" in value;
+}
+
+function appendTailwindConfig(
+  config: {
+    tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
+  },
+  tailwindConfig: TailwindConfigInput,
+): void {
+  const current = config.tailwind;
+  config.tailwind = current === undefined ? tailwindConfig : [
+    ...(Array.isArray(current) ? current : [current]),
+    tailwindConfig,
+  ];
 }
 
 /**
@@ -1600,6 +1668,11 @@ function createInkBuilder<
     const currentGlobal = config.global;
 
     for (const entry of entries) {
+      if (isTailwindImportObject(entry)) {
+        appendTailwindConfig(config, entry.tailwind);
+        continue;
+      }
+
       if (
         typeof entry === "string" ||
         (typeof entry === "object" && entry !== null && "path" in entry)
@@ -1756,6 +1829,11 @@ function createInkSimpleBuilder<
     const currentGlobal = config.global;
 
     for (const entry of entries) {
+      if (isTailwindImportObject(entry)) {
+        appendTailwindConfig(config, entry.tailwind);
+        continue;
+      }
+
       if (
         typeof entry === "string" ||
         (typeof entry === "object" && entry !== null && "path" in entry)
@@ -1814,18 +1892,26 @@ export default function ink<
   compiled?: CompiledConfig<Record<string, StyleDeclarationInput>>,
   runtimeOptions?: InkRuntimeOptions,
 ): InkSimpleStyleAccessor<V>;
+export default function ink(
+  input: TailwindClassInput,
+): TailwindClassValue;
 export default function ink<
   T extends StyleSheetInput = StyleSheetInput,
   V extends VariantSheet<T> | undefined = VariantSheet<T> | undefined,
 >(
-  config?: InkConfig<T, V> | InkSimpleConfig<any> | InkBuilderOptions,
+  config?:
+    | InkConfig<T, V>
+    | InkSimpleConfig<any>
+    | InkBuilderOptions
+    | TailwindClassInput,
   compiled?: CompiledConfig<T>,
   runtimeOptions: InkRuntimeOptions = {},
 ):
   | (() => Accessor<T, V>)
   | InkSimpleStyleAccessor<any>
   | InkBuilder<T, V>
-  | InkSimpleBuilder<any> {
+  | InkSimpleBuilder<any>
+  | TailwindClassValue {
   if (new.target) {
     const builderOptions = normalizeInkBuilderOptions(config);
     if (builderOptions.simple) {
@@ -1837,6 +1923,9 @@ export default function ink<
       ) as InkSimpleBuilder<any>;
     }
     return createInkBuilder<T, V>(compiled, runtimeOptions);
+  }
+  if (typeof config === "string" || Array.isArray(config)) {
+    return tw(config);
   }
   return compileConfig(
     config as InkConfig<T, V> | InkSimpleConfig<any>,

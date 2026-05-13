@@ -17,6 +17,7 @@ import {
 import {
   cVar,
   font,
+  tailwindConfigToCss,
   Theme,
   toCssDeclaration,
   toCssGlobalRules,
@@ -1229,6 +1230,87 @@ Deno.test("parser collects @import paths from stylesheet blocks", () => {
   );
 });
 
+Deno.test("serializes Tailwind CSS config directives", () => {
+  const serialized = tailwindConfigToCss({
+    import: ["tailwindcss", "tw-animate-css"],
+    customVariant: {
+      dark: "&:is(.dark *)",
+    },
+    themeInline: {
+      "--font-heading": "var(--font-sans)",
+      "--font-sans": "'Inter Variable', sans-serif",
+    },
+    root: {
+      "--background": "oklch(1 0 0)",
+    },
+    ".dark": {
+      "--background": "oklch(0.145 0 0)",
+    },
+    layer: {
+      base: {
+        "*": {
+          "@apply": tw("border-border outline-ring/50"),
+          boxSizing: "border-box",
+        },
+        body: tw("bg-background text-foreground"),
+      },
+    },
+    utility: {
+      "tab-*": {
+        tabSize: "--value(--tab-size-*)",
+      },
+    },
+  });
+
+  assertEquals(serialized.imports, [`"tailwindcss"`, `"tw-animate-css"`]);
+  assert(serialized.css.includes("@custom-variant dark (&:is(.dark *));"));
+  assert(
+    serialized.css.includes(
+      "@theme inline{--font-heading:var(--font-sans);--font-sans:'Inter Variable', sans-serif;}",
+    ),
+  );
+  assert(serialized.css.includes(":root{--background:oklch(1 0 0);}"));
+  assert(serialized.css.includes(".dark{--background:oklch(0.145 0 0);}"));
+  assert(
+    serialized.css.includes(
+      "@layer base{*{@apply border-border outline-ring/50;box-sizing:border-box;}body{@apply bg-background text-foreground;}}",
+    ),
+  );
+  assert(
+    serialized.css.includes("@utility tab-*{tab-size:--value(--tab-size-*);}"),
+  );
+});
+
+Deno.test("parser collects Tailwind CSS config imports and directives", () => {
+  const parsed = parseInkCallArguments(`{
+    tailwind: {
+      import: ["tailwindcss"],
+      customVariant: {
+        dark: "&:is(.dark *)"
+      },
+      root: {
+        "--background": "oklch(1 0 0)"
+      },
+      layer: {
+        base: {
+          body: tw("bg-background text-foreground")
+        }
+      }
+    }
+  }`);
+
+  assert(parsed !== null);
+  assertEquals(parsed.imports, [`"tailwindcss"`]);
+  assert(
+    parsed.tailwindCss?.includes("@custom-variant dark (&:is(.dark *));"),
+  );
+  assert(
+    parsed.tailwindCss?.includes(
+      "@layer base{body{@apply bg-background text-foreground;}}",
+    ),
+  );
+});
+
 Deno.test("parser supports @set with configured containers", () => {
   const parsed = parseInkCallArguments(
     `{
@@ -1433,6 +1515,36 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
     };
 
     styles.header();
+  `);
+});
+
+Deno.test("published types accept Tailwind config imports", () => {
+  assertPackageTypesSucceed(`
+    import ink, { type TailwindConfigInput } from "@kraken/ink";
+
+    const tailwind: TailwindConfigInput = {
+      import: ["tailwindcss", "tw-animate-css"],
+      customVariant: {
+        dark: "&:is(.dark *)",
+      },
+      themeInline: {
+        "--font-sans": "'Inter Variable', sans-serif",
+      },
+      root: {
+        "--background": "oklch(1 0 0)",
+      },
+      ".dark": {
+        "--background": "oklch(0.145 0 0)",
+      },
+      layer: {
+        base: {
+          body: ink("bg-background text-foreground"),
+        },
+      },
+    };
+
+    const styles = new ink();
+    styles.import({ tailwind });
   `);
 });
 
@@ -1789,6 +1901,68 @@ Deno.test("runtime injects Fontsource imports and font root variables", () => {
     const text = styleTag?.textContent ?? "";
     assert(text.includes(":root{--font-display:Bungee, system-ui}"));
     assertMatch(text, /\.ink_[a-z0-9]+\{font-family:var\(--font-display\)\}/);
+  } finally {
+    globals.document = originalDocument;
+  }
+});
+
+Deno.test("runtime accepts Tailwind config imports", () => {
+  type FakeStyleTag = {
+    id: string;
+    textContent: string;
+    appendChild: (node: unknown) => void;
+  };
+
+  const globals = globalThis as Record<string, unknown>;
+  const originalDocument = globals.document;
+  const tags = new Map<string, FakeStyleTag>();
+  const fakeDocument = {
+    getElementById(id: string) {
+      return tags.get(id) ?? null;
+    },
+    createElement(_tag: "style"): FakeStyleTag {
+      return {
+        id: "",
+        textContent: "",
+        appendChild(node: unknown) {
+          this.textContent += String(node);
+        },
+      };
+    },
+    createTextNode(text: string) {
+      return text;
+    },
+    head: {
+      appendChild(node: unknown) {
+        const tag = node as FakeStyleTag;
+        tags.set(tag.id, tag);
+      },
+    },
+  };
+
+  globals.document = fakeDocument;
+
+  try {
+    const styles = ink({
+      tailwind: {
+        import: ["tailwindcss"],
+        layer: {
+          base: {
+            body: tw("bg-background text-foreground"),
+          },
+        },
+      },
+    });
+
+    styles();
+    const importTag = fakeDocument.getElementById("__ink_runtime_imports");
+    const styleTag = fakeDocument.getElementById("__ink_runtime_styles");
+    assertEquals(importTag?.textContent, '@import "tailwindcss";');
+    assert(
+      styleTag?.textContent?.includes(
+        "@layer base{body{@apply bg-background text-foreground;}}",
+      ),
+    );
   } finally {
     globals.document = originalDocument;
   }
@@ -2795,6 +2969,67 @@ Deno.test("extracts imported rules passed as array to import()", () => {
     assert(css.includes('@import "/src/lib/foo.css";'));
     assert(css.includes("@layer test{testRule{color:red}}"));
     assert(!css.includes("0 rules *"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("extracts Tailwind CSS config imported through new ink().import()", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib/styles`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/tailwind.ts`,
+      `import tw from "@kraken/ink";\n` +
+        `export default {\n` +
+        `  import: ["tailwindcss", "tw-animate-css"],\n` +
+        `  customVariant: { dark: "&:is(.dark *)" },\n` +
+        `  themeInline: { "--font-sans": "'Inter Variable', sans-serif" },\n` +
+        `  root: { "--background": "oklch(1 0 0)" },\n` +
+        `  ".dark": { "--background": "oklch(0.145 0 0)" },\n` +
+        `  layer: { base: { body: tw("bg-background text-foreground") } },\n` +
+        `  utility: { "tab-*": { tabSize: "--value(--tab-size-*)" } },\n` +
+        `} as const;\n`,
+    );
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink from "@kraken/ink";\n` +
+      `import TWConfig from "./styles/tailwind";\n` +
+      `const siteStyles = new ink();\n` +
+      `siteStyles.import({ tailwind: TWConfig });\n`;
+
+    const transformed = transform(moduleCode, `${root}/src/lib/app.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.includes('import "virtual:ink/styles.css";'));
+    assert(!code.includes("siteStyles.import"));
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes('@import "tailwindcss";'));
+    assert(css.includes('@import "tw-animate-css";'));
+    assert(css.includes("@custom-variant dark (&:is(.dark *));"));
+    assert(
+      css.includes(
+        "@theme inline{--font-sans:'Inter Variable', sans-serif;}",
+      ),
+    );
+    assert(css.includes(":root{--background:oklch(1 0 0);}"));
+    assert(css.includes(".dark{--background:oklch(0.145 0 0);}"));
+    assert(
+      css.includes(
+        "@layer base{body{@apply bg-background text-foreground;}}",
+      ),
+    );
+    assert(css.includes("@utility tab-*{tab-size:--value(--tab-size-*);}"));
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
