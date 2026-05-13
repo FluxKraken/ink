@@ -12,6 +12,8 @@ export { cVar } from "./src/index.ts";
 export { font } from "./src/index.ts";
 /** Named export for defining theme token maps. */
 export { Theme } from "./src/index.ts";
+/** Named export for defining themes with explicit selectors. */
+export { ThemeAdvanced } from "./src/index.ts";
 /** Named export for Tailwind-aware class markers. */
 export { tw } from "./src/index.ts";
 /** Named export for referencing theme-backed CSS variables. */
@@ -60,5 +62,9 @@ export type { LayeredApplyInput } from "./src/index.ts";
 export type { ContainerSetInput } from "./src/index.ts";
 /** Theme token map accepted by `new Theme(...)`. */
 export type { ThemeTokenInput } from "./src/index.ts";
+/** Advanced theme input accepted by `new ThemeAdvanced(...)`. */
+export type { ThemeAdvancedInput } from "./src/index.ts";
+/** Theme expansion strategy used for imported themes. */
+export type { ThemeMode } from "./src/index.ts";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./src/index.ts";

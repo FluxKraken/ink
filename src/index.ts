@@ -9,7 +9,7 @@ import type {
   InkSimpleBuilder,
 } from "./runtime.js";
 import { inkVite } from "./vite.js";
-import { cVar, font, Theme, tVar, tw } from "./shared.js";
+import { cVar, font, Theme, ThemeAdvanced, tVar, tw } from "./shared.js";
 
 type Ink = typeof runtimeInk & {
   (input: Parameters<typeof tw>[0]): ReturnType<typeof tw>;
@@ -19,6 +19,7 @@ type Ink = typeof runtimeInk & {
   cVar: typeof cVar;
   font: typeof font;
   Theme: typeof Theme;
+  ThemeAdvanced: typeof ThemeAdvanced;
   tw: typeof tw;
   tVar: typeof tVar;
 };
@@ -33,6 +34,7 @@ const ink = Object.assign(runtimeInk, {
   cVar,
   font,
   Theme,
+  ThemeAdvanced,
   tw,
   tVar,
 }) as Ink;
@@ -47,6 +49,8 @@ export { cVar };
 export { font };
 /** Named export for defining theme token maps. */
 export { Theme };
+/** Named export for defining themes with explicit selectors. */
+export { ThemeAdvanced };
 /** Named export for Tailwind-aware class markers. */
 export { tw };
 /** Named export for referencing theme-backed CSS variables. */
@@ -93,5 +97,9 @@ export type { LayeredApplyInput } from "./shared.js";
 export type { ContainerSetInput } from "./shared.js";
 /** Theme token map accepted by `new Theme(...)`. */
 export type { ThemeTokenInput } from "./shared.js";
+/** Advanced theme input accepted by `new ThemeAdvanced(...)`. */
+export type { ThemeAdvancedInput } from "./shared.js";
+/** Theme expansion strategy used for imported themes. */
+export type { ThemeMode } from "./shared.js";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./shared.js";

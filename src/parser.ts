@@ -7,6 +7,7 @@ import {
   isFontTokenProperty,
   isTailwindClassValue,
   isTheme,
+  isThemeAdvanced,
   prefixTailwindVariantClasses,
   type StyleDeclaration,
   type StyleSheet,
@@ -15,6 +16,7 @@ import {
   type TailwindConfigInput,
   tailwindConfigToCss,
   Theme,
+  ThemeAdvanced,
   type ThemeMode,
   toFontVarName,
   toTailwindVariantForNestedKey,
@@ -85,7 +87,8 @@ type TemplateLiteralReference = {
 
 type ThemeConstructorReference = {
   kind: "theme-constructor";
-  tokens: ParsedObject;
+  constructorName: "Theme" | "ThemeAdvanced";
+  argument: ParsedObject;
 };
 
 type FontCallReference = {
@@ -328,13 +331,13 @@ function parseThemeConstructor(
   index: number,
 ): [ThemeConstructorReference, number] {
   const [constructorName, constructorEnd] = parseIdentifier(input, index);
-  if (constructorName !== "Theme") {
+  if (constructorName !== "Theme" && constructorName !== "ThemeAdvanced") {
     throw new Error(`Unsupported constructor "${constructorName}"`);
   }
 
   let cursor = skipWhitespace(input, constructorEnd);
   if (input[cursor] !== "(") {
-    throw new Error("Expected '(' after Theme");
+    throw new Error(`Expected '(' after ${constructorName}`);
   }
 
   cursor = skipWhitespace(input, cursor + 1);
@@ -343,19 +346,20 @@ function parseThemeConstructor(
     typeof argumentValue !== "object" || argumentValue === null ||
     Array.isArray(argumentValue) || isCssVarRef(argumentValue)
   ) {
-    throw new Error("Theme() expects an object literal");
+    throw new Error(`${constructorName}() expects an object literal`);
   }
 
   cursor = parseCallTerminator(
     input,
     argumentEnd,
-    "Theme() accepts a single object argument",
-    "Expected ')' after Theme() call",
+    `${constructorName}() accepts a single object argument`,
+    `Expected ')' after ${constructorName}() call`,
   );
 
   return [{
     kind: "theme-constructor",
-    tokens: argumentValue,
+    constructorName,
+    argument: argumentValue,
   }, cursor];
 }
 
@@ -727,7 +731,9 @@ function isThemeConstructorReference(
   return (
     isPlainObject(value) &&
     value.kind === "theme-constructor" &&
-    isPlainObject(value.tokens)
+    (value.constructorName === "Theme" ||
+      value.constructorName === "ThemeAdvanced") &&
+    isPlainObject(value.argument)
   );
 }
 
@@ -1500,9 +1506,13 @@ function normalizeImportedThemes(
   const global: StyleSheet = {};
 
   for (const [scope, themeValue] of Object.entries(value)) {
+    if (options.themeMode === "custom" && !isThemeAdvanced(themeValue)) {
+      return null;
+    }
+
     let vars: Record<string, StyleValue> | null = null;
 
-    if (isTheme(themeValue)) {
+    if (isTheme(themeValue) || isThemeAdvanced(themeValue)) {
       vars = normalizeThemeVarsRecord(themeValue.vars, options);
     } else {
       vars = normalizeThemeVarsRecord(themeValue, options);
@@ -1532,6 +1542,27 @@ function normalizeImportedThemes(
         (mediaRule[":root"] as Record<string, StyleValue> | undefined) ?? {};
       mediaRule[":root"] = { ...currentRoot, ...vars };
       global[mediaKey] = mediaRule as StyleDeclaration;
+      continue;
+    }
+
+    if (options.themeMode === "custom") {
+      const selector = toThemeScopeSelector(
+        (themeValue as ThemeAdvanced).selector,
+      );
+      if (selector === null) {
+        root.push(vars);
+        continue;
+      }
+
+      const scopeKey = `@scope (${selector})`;
+      const scopeRule = (global[scopeKey] as
+        | Record<string, StyleDeclaration | StyleValue>
+        | undefined) ??
+        {};
+      const currentScope =
+        (scopeRule[":scope"] as Record<string, StyleValue> | undefined) ?? {};
+      scopeRule[":scope"] = { ...currentScope, ...vars };
+      global[scopeKey] = scopeRule as StyleDeclaration;
       continue;
     }
 
@@ -1963,19 +1994,26 @@ function resolveParsedValue(
   }
 
   if (isThemeConstructorReference(value)) {
-    const resolvedTokens = resolveParsedValue(
-      value.tokens,
+    const resolvedArgument = resolveParsedValue(
+      value.argument,
       resolveIdentifier,
       keepUnresolvedIdentifiers,
     );
-    if (resolvedTokens === UNRESOLVED) {
+    if (resolvedArgument === UNRESOLVED) {
       return keepUnresolvedIdentifiers ? value : UNRESOLVED;
     }
-    if (!isPlainObject(resolvedTokens)) {
+    if (!isPlainObject(resolvedArgument)) {
       return keepUnresolvedIdentifiers ? value : UNRESOLVED;
     }
     try {
-      return new Theme(resolvedTokens as Record<string, StyleValue>);
+      if (value.constructorName === "ThemeAdvanced") {
+        return new ThemeAdvanced(
+          resolvedArgument as unknown as ConstructorParameters<
+            typeof ThemeAdvanced
+          >[0],
+        );
+      }
+      return new Theme(resolvedArgument as Record<string, StyleValue>);
     } catch {
       return keepUnresolvedIdentifiers ? value : UNRESOLVED;
     }

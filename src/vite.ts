@@ -22,6 +22,7 @@ import {
   type StyleSheet,
   type StyleValue,
   Theme,
+  ThemeAdvanced,
   type ThemeMode,
   toCssGlobalRules,
   toCssLayerOrderRule,
@@ -544,6 +545,7 @@ function getStaticInkDefaultExport(): Record<string, unknown> {
       cVar,
       font,
       Theme,
+      ThemeAdvanced,
       tw,
       tVar,
     },
@@ -558,6 +560,7 @@ function getStaticInkNamespace(): Record<string, unknown> {
     cVar,
     font,
     Theme,
+    ThemeAdvanced,
     tw,
     tVar,
   };
@@ -1336,7 +1339,9 @@ function normalizeResolution(value: unknown): "static" | "dynamic" | "hybrid" {
 }
 
 function normalizeThemeMode(value: unknown): ThemeMode {
-  return value === "scope" || value === "color-scheme" ? value : "color-scheme";
+  return value === "scope" || value === "color-scheme" || value === "custom"
+    ? value
+    : "color-scheme";
 }
 
 function normalizeDebugOptions(

@@ -18,6 +18,9 @@ import {
   TailwindConfigInput,
   TailwindConfigPluginInput,
   Theme,
+  ThemeAdvanced,
+  ThemeAdvancedInput,
+  ThemeMode,
   ThemeTokenInput,
   tw,
 } from "./dist/shared.d.ts";
@@ -90,6 +93,7 @@ type InkRuntimeOptions = {
   layers?: readonly string[];
   defaultUnit?: string;
   utilities?: StyleSheetInput;
+  themeMode?: ThemeMode;
   resolution?: "static" | "dynamic" | "hybrid";
   debug?: {
     enabled?: boolean;
@@ -225,10 +229,16 @@ export type { LayeredApplyInput };
 export type { ContainerSetInput };
 /** Re-exported theme token input type. */
 export type { ThemeTokenInput };
+/** Re-exported advanced theme input type. */
+export type { ThemeAdvancedInput };
+/** Re-exported theme expansion mode type. */
+export type { ThemeMode };
 /** Re-exported imported theme map type. */
 export type { ImportedThemesInput };
 /** Re-exported Theme constructor. */
 export { Theme };
+/** Re-exported ThemeAdvanced constructor. */
+export { ThemeAdvanced };
 
 /** Combined Ink runtime API. */
 export interface Ink {
@@ -261,6 +271,8 @@ export interface Ink {
   font: typeof font;
   /** Theme constructor. */
   Theme: typeof Theme;
+  /** Theme constructor with an explicit selector. */
+  ThemeAdvanced: typeof ThemeAdvanced;
   /** Tailwind class helper. */
   tw: typeof tw;
   /** Theme variable proxy. */
@@ -280,6 +292,8 @@ export const cVar: (name: string, fallback?: PrimitiveStyleValue) => CssVarRef;
 export { font };
 /** Named export for defining theme token maps. */
 export { Theme };
+/** Named export for defining themes with explicit selectors. */
+export { ThemeAdvanced };
 /** Named export for Tailwind-aware class markers. */
 export { tw };
 /** Named export for referencing theme-backed CSS variables. */

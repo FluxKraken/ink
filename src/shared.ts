@@ -104,10 +104,17 @@ export type RootVarInput =
   };
 /** Friendly token map accepted by {@link Theme}. */
 export type ThemeTokenInput = Record<string, StyleValue>;
+/** Advanced theme input with an explicit selector used by custom theme mode. */
+export interface ThemeAdvancedInput {
+  /** Selector used as the theme scope root when `themeMode` is `"custom"`. */
+  selector: string;
+  /** Friendly token map converted into CSS custom properties. */
+  vars: ThemeTokenInput;
+}
 /** Theme expansion strategy used for imported themes. */
-export type ThemeMode = "scope" | "color-scheme";
+export type ThemeMode = "scope" | "color-scheme" | "custom";
 /** Theme-like value accepted by `themes`. */
-export type ThemeInput = Theme | ThemeTokenInput;
+export type ThemeInput = Theme | ThemeAdvanced | ThemeTokenInput;
 /** Map of imported theme names/selectors to theme definitions. */
 export type ImportedThemesInput = Record<string, ThemeInput>;
 /** Fontsource package entry accepted by `fonts`. */
@@ -288,6 +295,43 @@ export class Theme {
   }
 }
 
+/** Theme definition with an explicit selector for `themeMode: "custom"`. */
+export class ThemeAdvanced {
+  /** Discriminator used for theme detection across parsing/runtime paths. */
+  readonly kind = "ink-theme-advanced" as const;
+  /** Selector used as the theme scope root in custom theme mode. */
+  readonly selector: string;
+  /** Normalized CSS custom properties emitted for this theme. */
+  readonly vars: Record<string, StyleValue>;
+
+  constructor(input: ThemeAdvancedInput) {
+    if (
+      typeof input !== "object" || input === null ||
+      Array.isArray(input)
+    ) {
+      throw new Error("ThemeAdvanced() expects an object argument.");
+    }
+
+    if (typeof input.selector !== "string") {
+      throw new Error("ThemeAdvanced selector must be a string.");
+    }
+
+    const selector = input.selector.trim();
+    if (selector.length === 0) {
+      throw new Error("ThemeAdvanced selector must not be empty.");
+    }
+    if (
+      typeof input.vars !== "object" || input.vars === null ||
+      Array.isArray(input.vars)
+    ) {
+      throw new Error("ThemeAdvanced vars must be an object.");
+    }
+
+    this.selector = selector;
+    this.vars = normalizeThemeTokens(input.vars);
+  }
+}
+
 /** Type guard for {@link Theme} values. */
 export function isTheme(value: unknown): value is Theme {
   return (
@@ -295,6 +339,22 @@ export function isTheme(value: unknown): value is Theme {
     value !== null &&
     "kind" in value &&
     (value as { kind?: unknown }).kind === "ink-theme" &&
+    "vars" in value &&
+    typeof (value as { vars?: unknown }).vars === "object" &&
+    (value as { vars?: unknown }).vars !== null &&
+    !Array.isArray((value as { vars?: unknown }).vars)
+  );
+}
+
+/** Type guard for {@link ThemeAdvanced} values. */
+export function isThemeAdvanced(value: unknown): value is ThemeAdvanced {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    (value as { kind?: unknown }).kind === "ink-theme-advanced" &&
+    "selector" in value &&
+    typeof (value as { selector?: unknown }).selector === "string" &&
     "vars" in value &&
     typeof (value as { vars?: unknown }).vars === "object" &&
     (value as { vars?: unknown }).vars !== null &&
@@ -339,7 +399,9 @@ export const tVar = new Proxy({} as ThemeVarAccessor, {
 function resolveImportedThemeVars(
   theme: ThemeInput,
 ): Record<string, StyleValue> {
-  return isTheme(theme) ? theme.vars : normalizeThemeTokens(theme);
+  return isTheme(theme) || isThemeAdvanced(theme)
+    ? theme.vars
+    : normalizeThemeTokens(theme);
 }
 
 function toThemeScopeSelector(scope: string): string | null {
@@ -388,6 +450,12 @@ export function themesToConfig(
   }
 
   for (const [scope, theme] of Object.entries(themes)) {
+    if (themeMode === "custom" && !isThemeAdvanced(theme)) {
+      throw new Error(
+        `themeMode "custom" requires each theme to be a ThemeAdvanced instance with a selector. Received "${scope}".`,
+      );
+    }
+
     const vars = resolveImportedThemeVars(theme);
 
     if (themeMode === "color-scheme") {
@@ -412,6 +480,27 @@ export function themesToConfig(
         (currentRule[":root"] as Record<string, StyleValue> | undefined) ?? {};
       currentRule[":root"] = { ...currentRoot, ...vars };
       global[mediaKey] = currentRule as StyleDeclaration;
+      continue;
+    }
+
+    if (themeMode === "custom") {
+      const selector = toThemeScopeSelector((theme as ThemeAdvanced).selector);
+
+      if (selector === null) {
+        root.push(vars);
+        continue;
+      }
+
+      const scopeKey = `@scope (${selector})`;
+      const currentRule = (global[scopeKey] as
+        | Record<string, StyleValue | StyleDeclaration>
+        | undefined) ??
+        {};
+      const currentScope =
+        (currentRule[":scope"] as Record<string, StyleValue> | undefined) ??
+          {};
+      currentRule[":scope"] = { ...currentScope, ...vars };
+      global[scopeKey] = currentRule as StyleDeclaration;
       continue;
     }
 

@@ -341,6 +341,25 @@ With `themeMode: "color-scheme"` in `ink.config.ts`, only `default`/`root`/
 `:root` and `dark` are used. `default` stays on `:root`, and `dark` is emitted
 inside `@media (prefers-color-scheme: dark)`.
 
+With `themeMode: "custom"`, define each theme with `ThemeAdvanced` so the
+selector travels with the theme value:
+
+```ts
+import ink, { ThemeAdvanced } from "@kraken/ink";
+
+const styles = new ink();
+
+styles.themes = {
+  light: new ThemeAdvanced({
+    selector: ":has([data-theme='light'])",
+    vars: {
+      blue: "#00aaff",
+      yellow: "hsl(60 80% 80%)",
+    },
+  }),
+};
+```
+
 ### React theme helper
 
 If you want a small React wrapper for TanStack Start or other React apps, import
@@ -641,7 +660,8 @@ export default {
 `themeMode: "color-scheme"` uses `themes.default` as the light/root theme and
 `themes.dark` inside `@media (prefers-color-scheme: dark)`. Use
 `themeMode: "scope"` to keep the existing class/selector-based `@scope`
-switching.
+switching, or `themeMode: "custom"` with `ThemeAdvanced` when each theme should
+carry its own selector.
 
 Then consume those aliases in your builder:
 

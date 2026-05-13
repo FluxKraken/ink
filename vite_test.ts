@@ -20,6 +20,7 @@ import {
   font,
   tailwindConfigToCss,
   Theme,
+  ThemeAdvanced,
   toCssDeclaration,
   toCssGlobalRules,
   toCssRules,
@@ -632,6 +633,22 @@ Deno.test("Theme and tVar map friendly theme tokens to css custom properties", (
     tVar.eval("linear-gradient(147deg, {headerBG}, {headerFG})"),
     "linear-gradient(147deg, var(--header-bg), var(--header-fg))",
   );
+});
+
+Deno.test("ThemeAdvanced stores an explicit selector for custom theme mode", () => {
+  const theme = new ThemeAdvanced({
+    selector: ":has([data-theme='light'])",
+    vars: {
+      blue: "#00aaff",
+      yellow: "hsl(60 80% 80%)",
+    },
+  });
+
+  assertEquals(theme.selector, ":has([data-theme='light'])");
+  assertEquals(theme.vars, {
+    "--blue": "#00aaff",
+    "--yellow": "hsl(60 80% 80%)",
+  });
 });
 
 Deno.test("ThemeProvider theme resolution maps root and class-backed scopes", () => {
@@ -1590,6 +1607,32 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
   `);
 });
 
+Deno.test("published types accept ThemeAdvanced custom theme definitions", () => {
+  assertPackageTypesSucceed(`
+    import ink, { ThemeAdvanced, type ThemeAdvancedInput } from "@kraken/ink";
+
+    const lightInput: ThemeAdvancedInput = {
+      selector: ":has([data-theme='light'])",
+      vars: {
+        blue: "#00aaff",
+        yellow: "hsl(60 80% 80%)",
+      },
+    };
+
+    const styles = new ink();
+    styles.themes = {
+      light: new ThemeAdvanced(lightInput),
+      dark: new ink.ThemeAdvanced({
+        selector: ":has([data-theme='dark'])",
+        vars: {
+          blue: "#0077aa",
+          yellow: "hsl(60 80% 30%)",
+        },
+      }),
+    };
+  `);
+});
+
 Deno.test("published types accept Tailwind config imports", () => {
   assertPackageTypesSucceed(`
     import ink, { type TailwindConfigInput } from "@kraken/ink";
@@ -1772,6 +1815,47 @@ Deno.test("parser expands themes into prefers-color-scheme rules", () => {
     darkMedia?.[":root"]?.["--header-bg"],
     "white",
   );
+  assertEquals(
+    styleDeclarationOf(parsed.base.header).backgroundColor,
+    cVar("--header-bg"),
+  );
+});
+
+Deno.test("parser expands advanced themes with custom selectors", () => {
+  const parsed = parseInkCallArguments(
+    `{
+      themes: {
+        light: new ThemeAdvanced({
+          selector: ":has([data-theme='light'])",
+          vars: {
+            headerBG: "black"
+          }
+        }),
+        dark: new ThemeAdvanced({
+          selector: ":has([data-theme='dark'])",
+          vars: {
+            headerBG: "white"
+          }
+        })
+      },
+      base: {
+        header: {
+          backgroundColor: tVar.headerBG
+        }
+      }
+    }`,
+    { themeMode: "custom" },
+  );
+
+  assert(parsed !== null);
+  const lightScope = parsed.global?.["@scope (:has([data-theme='light']))"] as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  const darkScope = parsed.global?.["@scope (:has([data-theme='dark']))"] as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  assertEquals(lightScope?.[":scope"]?.["--header-bg"], "black");
+  assertEquals(darkScope?.[":scope"]?.["--header-bg"], "white");
   assertEquals(
     styleDeclarationOf(parsed.base.header).backgroundColor,
     cVar("--header-bg"),
@@ -2308,6 +2392,88 @@ Deno.test("runtime injects themes root vars and prefers-color-scheme rules", () 
     assert(
       text.includes(
         "@media (prefers-color-scheme: dark){:root{--header-bg:white}}",
+      ),
+    );
+    assertMatch(text, /\.ink_[a-z0-9]+\{background-color:var\(--header-bg\)\}/);
+  } finally {
+    globals.document = originalDocument;
+  }
+});
+
+Deno.test("runtime injects advanced themes with custom selectors", () => {
+  type FakeStyleTag = {
+    id: string;
+    textContent: string;
+    appendChild: (node: unknown) => void;
+  };
+
+  const globals = globalThis as Record<string, unknown>;
+  const originalDocument = globals.document;
+  const tags = new Map<string, FakeStyleTag>();
+  const fakeDocument = {
+    getElementById(id: string) {
+      return tags.get(id) ?? null;
+    },
+    createElement(_tag: "style"): FakeStyleTag {
+      return {
+        id: "",
+        textContent: "",
+        appendChild(node: unknown) {
+          this.textContent += String(node);
+        },
+      };
+    },
+    createTextNode(text: string) {
+      return text;
+    },
+    head: {
+      appendChild(node: unknown) {
+        const tag = node as FakeStyleTag;
+        tags.set(tag.id, tag);
+      },
+    },
+  };
+
+  globals.document = fakeDocument;
+
+  try {
+    const styles = ink(
+      {
+        themes: {
+          light: new ThemeAdvanced({
+            selector: ":has([data-theme='light'])",
+            vars: {
+              headerBG: "black",
+            },
+          }),
+          dark: new ThemeAdvanced({
+            selector: ":has([data-theme='dark'])",
+            vars: {
+              headerBG: "white",
+            },
+          }),
+        },
+        base: {
+          header: {
+            backgroundColor: tVar.headerBG,
+          },
+        },
+      },
+      undefined,
+      { themeMode: "custom" },
+    );
+
+    styles();
+    const styleTag = fakeDocument.getElementById("__ink_runtime_styles");
+    const text = styleTag?.textContent ?? "";
+    assert(
+      text.includes(
+        "@scope (:has([data-theme='light'])){:scope{--header-bg:black}}",
+      ),
+    );
+    assert(
+      text.includes(
+        "@scope (:has([data-theme='dark'])){:scope{--header-bg:white}}",
       ),
     );
     assertMatch(text, /\.ink_[a-z0-9]+\{background-color:var\(--header-bg\)\}/);
@@ -3800,6 +3966,65 @@ Deno.test("loads ink.config.ts scope theme mode into the shared stylesheet", () 
     const css = load(VIRTUAL_ID) as string;
     assert(css.includes(":root{--header-bg:black}"));
     assert(css.includes("@scope (.dark){:scope{--header-bg:white}}"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("loads ink.config.ts custom theme mode into the shared stylesheet", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { ThemeAdvanced } from "@kraken/ink";\n` +
+        `export default {\n` +
+        `  themeMode: "custom",\n` +
+        `  themes: {\n` +
+        `    light: new ThemeAdvanced({\n` +
+        `      selector: ":has([data-theme='light'])",\n` +
+        `      vars: { headerBG: "black" },\n` +
+        `    }),\n` +
+        `    dark: new ThemeAdvanced({\n` +
+        `      selector: ":has([data-theme='dark'])",\n` +
+        `      vars: { headerBG: "white" },\n` +
+        `    }),\n` +
+        `  },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink, { tVar } from "@kraken/ink";\n` +
+      `export const styles = ink({\n` +
+      `  base: {\n` +
+      `    header: {\n` +
+      `      backgroundColor: tVar.headerBG,\n` +
+      `    },\n` +
+      `  },\n` +
+      `});`;
+    const transformed = transform(moduleCode, `${root}/src/app.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(
+      css.includes(
+        "@scope (:has([data-theme='light'])){:scope{--header-bg:black}}",
+      ),
+    );
+    assert(
+      css.includes(
+        "@scope (:has([data-theme='dark'])){:scope{--header-bg:white}}",
+      ),
+    );
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
