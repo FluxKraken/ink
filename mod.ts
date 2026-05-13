@@ -48,6 +48,8 @@ export type { ImportInput } from "./src/index.ts";
 export type { TailwindConfigInput } from "./src/index.ts";
 /** Tailwind CSS import entries accepted by `TailwindConfigInput.import`. */
 export type { TailwindConfigImportInput } from "./src/index.ts";
+/** Tailwind CSS plugin entries accepted by `TailwindConfigInput.plugin`. */
+export type { TailwindConfigPluginInput } from "./src/index.ts";
 /** Tailwind class marker returned by `tw(...)`. */
 export type { TailwindClassValue } from "./src/index.ts";
 /** Input accepted by `tw(...)`. */

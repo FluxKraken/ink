@@ -504,6 +504,7 @@ import ink, { type TailwindConfigInput, tw } from "@kraken/ink";
 
 const tailwind: TailwindConfigInput = {
   import: ["tailwindcss", "tw-animate-css", "shadcn/tailwind.css"],
+  plugin: ["@tailwindcss/typography"],
   customVariant: {
     dark: "&:is(.dark *)",
   },

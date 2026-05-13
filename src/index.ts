@@ -81,6 +81,8 @@ export type { ImportInput } from "./shared.js";
 export type { TailwindConfigInput } from "./shared.js";
 /** Tailwind CSS import entries accepted by `TailwindConfigInput.import`. */
 export type { TailwindConfigImportInput } from "./shared.js";
+/** Tailwind CSS plugin entries accepted by `TailwindConfigInput.plugin`. */
+export type { TailwindConfigPluginInput } from "./shared.js";
 /** Tailwind class marker returned by `tw(...)`. */
 export type { TailwindClassValue } from "./shared.js";
 /** Input accepted by `tw(...)`. */

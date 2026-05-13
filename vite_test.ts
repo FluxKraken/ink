@@ -1233,6 +1233,7 @@ Deno.test("parser collects @import paths from stylesheet blocks", () => {
 Deno.test("serializes Tailwind CSS config directives", () => {
   const serialized = tailwindConfigToCss({
     import: ["tailwindcss", "tw-animate-css"],
+    plugin: ["@tailwindcss/typography"],
     customVariant: {
       dark: "&:is(.dark *)",
     },
@@ -1263,6 +1264,7 @@ Deno.test("serializes Tailwind CSS config directives", () => {
   });
 
   assertEquals(serialized.imports, [`"tailwindcss"`, `"tw-animate-css"`]);
+  assert(serialized.css.includes('@plugin "@tailwindcss/typography";'));
   assert(serialized.css.includes("@custom-variant dark (&:is(.dark *));"));
   assert(
     serialized.css.includes(
@@ -1285,6 +1287,7 @@ Deno.test("parser collects Tailwind CSS config imports and directives", () => {
   const parsed = parseInkCallArguments(`{
     tailwind: {
       import: ["tailwindcss"],
+      plugin: ["@tailwindcss/typography"],
       customVariant: {
         dark: "&:is(.dark *)"
       },
@@ -1301,6 +1304,9 @@ Deno.test("parser collects Tailwind CSS config imports and directives", () => {
 
   assert(parsed !== null);
   assertEquals(parsed.imports, [`"tailwindcss"`]);
+  assert(
+    parsed.tailwindCss?.includes('@plugin "@tailwindcss/typography";'),
+  );
   assert(
     parsed.tailwindCss?.includes("@custom-variant dark (&:is(.dark *));"),
   );
@@ -1524,6 +1530,7 @@ Deno.test("published types accept Tailwind config imports", () => {
 
     const tailwind: TailwindConfigInput = {
       import: ["tailwindcss", "tw-animate-css"],
+      plugin: ["@tailwindcss/typography"],
       customVariant: {
         dark: "&:is(.dark *)",
       },
@@ -2988,6 +2995,7 @@ Deno.test("extracts Tailwind CSS config imported through new ink().import()", ()
       `import tw from "@kraken/ink";\n` +
         `export default {\n` +
         `  import: ["tailwindcss", "tw-animate-css"],\n` +
+        `  plugin: ["@tailwindcss/typography"],\n` +
         `  customVariant: { dark: "&:is(.dark *)" },\n` +
         `  themeInline: { "--font-sans": "'Inter Variable', sans-serif" },\n` +
         `  root: { "--background": "oklch(1 0 0)" },\n` +
@@ -3016,6 +3024,7 @@ Deno.test("extracts Tailwind CSS config imported through new ink().import()", ()
     const css = load(VIRTUAL_ID) as string;
     assert(css.includes('@import "tailwindcss";'));
     assert(css.includes('@import "tw-animate-css";'));
+    assert(css.includes('@plugin "@tailwindcss/typography";'));
     assert(css.includes("@custom-variant dark (&:is(.dark *));"));
     assert(
       css.includes(

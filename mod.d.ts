@@ -16,6 +16,7 @@ import {
   TailwindClassValue,
   TailwindConfigImportInput,
   TailwindConfigInput,
+  TailwindConfigPluginInput,
   Theme,
   ThemeTokenInput,
   tw,
@@ -212,6 +213,8 @@ export type { TailwindClassInput };
 export type { TailwindConfigInput };
 /** Tailwind CSS import entries accepted by `TailwindConfigInput.import`. */
 export type { TailwindConfigImportInput };
+/** Tailwind CSS plugin entries accepted by `TailwindConfigInput.plugin`. */
+export type { TailwindConfigPluginInput };
 /** Layered `@apply` helper object. */
 export type { LayeredApplyInput };
 /** Object form accepted by the `@set` directive. */

@@ -176,10 +176,15 @@ export type TailwindConfigImportInput =
   | ImportPathObject
   | readonly (string | ImportPathObject)[];
 
+/** Plugin entries accepted by a Tailwind CSS config object. */
+export type TailwindConfigPluginInput = string | readonly string[];
+
 /** Tailwind CSS directives and global rules emitted into the Ink stylesheet. */
 export interface TailwindConfigInput {
   /** Package or stylesheet imports emitted as top-level `@import` rules. */
   import?: TailwindConfigImportInput;
+  /** Package plugins emitted as top-level `@plugin` rules. */
+  plugin?: TailwindConfigPluginInput;
   /** `@custom-variant` entries, for example `{ dark: "&:is(.dark *)" }`. */
   customVariant?: Record<string, string>;
   /** CSS custom properties emitted in `@theme`. */
@@ -1393,6 +1398,17 @@ function toQuotedImportSpecifier(path: string): string {
   return JSON.stringify(trimmed);
 }
 
+function toQuotedPluginSpecifier(path: string): string {
+  const trimmed = path.trim();
+  if (trimmed.length === 0) {
+    throw new Error("Tailwind plugin paths must not be empty.");
+  }
+  if (/^["'][\s\S]*["']$/.test(trimmed)) {
+    return trimmed;
+  }
+  return JSON.stringify(trimmed);
+}
+
 function normalizeTailwindImportEntry(entry: unknown): string {
   if (typeof entry === "string") {
     return toQuotedImportSpecifier(entry);
@@ -1412,6 +1428,19 @@ function normalizeTailwindImportEntry(entry: unknown): string {
 function normalizeTailwindImportInput(value: unknown): string[] {
   const entries = Array.isArray(value) ? value : [value];
   return Array.from(new Set(entries.map(normalizeTailwindImportEntry)));
+}
+
+function normalizeTailwindPluginEntry(entry: unknown): string {
+  if (typeof entry === "string") {
+    return toQuotedPluginSpecifier(entry);
+  }
+
+  throw new Error("Tailwind plugin entries must be strings.");
+}
+
+function normalizeTailwindPluginInput(value: unknown): string[] {
+  const entries = Array.isArray(value) ? value : [value];
+  return Array.from(new Set(entries.map(normalizeTailwindPluginEntry)));
 }
 
 function tailwindClassListToCss(value: unknown): string | null {
@@ -1528,6 +1557,12 @@ function toTailwindCustomVariantRules(value: unknown): string[] {
   return rules;
 }
 
+function toTailwindPluginRules(value: unknown): string[] {
+  return normalizeTailwindPluginInput(value).map((pluginPath) =>
+    `@plugin ${pluginPath};`
+  );
+}
+
 function toTailwindLayerRules(value: unknown): string[] {
   if (!isPlainRecord(value)) {
     throw new Error("layer must be an object.");
@@ -1581,6 +1616,10 @@ export function tailwindConfigToCss(
   for (const [key, value] of Object.entries(config)) {
     if (key === "import") {
       imports.push(...normalizeTailwindImportInput(value));
+      continue;
+    }
+    if (key === "plugin") {
+      css.push(...toTailwindPluginRules(value));
       continue;
     }
     if (key === "customVariant") {
