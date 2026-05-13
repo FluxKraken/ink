@@ -9,6 +9,7 @@ import { twMerge } from "npm:tailwind-merge";
 import { inkVite } from "./src/vite.ts";
 import { getNextThemeName, resolveManagedThemeEntries } from "./src/react.ts";
 import ink from "./src/runtime.ts";
+import { convertCssToTypeScript, runCli } from "./src/cli.ts";
 import {
   findNewInkDeclarations,
   parseInkCallArguments,
@@ -1317,6 +1318,71 @@ Deno.test("parser collects Tailwind CSS config imports and directives", () => {
   );
 });
 
+Deno.test("cli converts CSS into a statically extracted Ink module", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib`, { recursive: true });
+    configResolved({ root, resolve: { alias: [] } });
+
+    const source = convertCssToTypeScript(
+      '@import "tailwindcss";\n' +
+        "@theme { --color-brand: red; }\n" +
+        ".button\\:active { color: var(--color-brand); }\n",
+    );
+
+    assert(source.includes("styles.import"));
+    assert(source.includes("styles.tailwindCss"));
+
+    const transformed = transform(source, `${root}/src/lib/styles.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.includes('import "virtual:ink/styles.css";'));
+    assert(!code.includes("--color-brand"));
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes('@import "tailwindcss";'));
+    assert(css.includes("@theme { --color-brand: red; }"));
+    assert(css.includes(".button\\:active { color: var(--color-brand); }"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("cli convert command writes the output file", async () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const inputPath = join(root, "styles.css");
+    const outputPath = join(root, "src", "lib", "styles.ts");
+    Deno.writeTextFileSync(inputPath, "body { margin: 0; }\n");
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const code = await runCli(["convert", inputPath, outputPath], {
+      stdout: (message) => stdout.push(message),
+      stderr: (message) => stderr.push(message),
+    });
+
+    assertEquals(code, 0);
+    assertEquals(stderr, []);
+    assertEquals(stdout, [`Wrote ${outputPath}`]);
+    assertEquals(
+      Deno.readTextFileSync(outputPath),
+      convertCssToTypeScript("body { margin: 0; }\n"),
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("parser supports @set with configured containers", () => {
   const parsed = parseInkCallArguments(
     `{
@@ -1552,6 +1618,7 @@ Deno.test("published types accept Tailwind config imports", () => {
 
     const styles = new ink();
     styles.import({ tailwind });
+    styles.tailwindCss = ["body { margin: 0; }"];
   `);
 });
 

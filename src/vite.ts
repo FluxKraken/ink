@@ -2180,6 +2180,8 @@ const CT_BUILDER_ASSIGNMENT_PROPERTIES = new Set([
   "rootVars",
   "variant",
   "defaults",
+  "tailwind",
+  "tailwindCss",
 ]);
 
 type AstScopeEntry = AstNewInkDeclaration | null;
@@ -4909,7 +4911,9 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               assignment.property === "root" ||
               assignment.property === "rootVars" ||
               assignment.property === "variant" ||
-              assignment.property === "defaults"
+              assignment.property === "defaults" ||
+              assignment.property === "tailwind" ||
+              assignment.property === "tailwindCss"
             ) {
               const partialParsed = parseInkCallArgumentsWithResolver(
                 `{ ${
@@ -4977,6 +4981,13 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                   assignment.property === "defaults" && partialParsed.defaults
                 ) {
                   configParts.defaults = partialParsed.defaults;
+                } else if (
+                  assignment.property === "tailwindCss" &&
+                  partialParsed.tailwindCss
+                ) {
+                  configParts.tailwindCss = partialParsed.tailwindCss;
+                } else if (assignment.property === "tailwind") {
+                  configParts.tailwind = partialParsed.tailwind;
                 }
                 if ((partialParsed.imports?.length ?? 0) > 0) {
                   importParts.push(partialParsed.imports!);

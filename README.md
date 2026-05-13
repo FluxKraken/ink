@@ -37,6 +37,17 @@ npm install tailwind-merge
 deno add npm:tailwind-merge
 ```
 
+## CLI
+
+Convert an existing CSS or Tailwind CSS file into an Ink TypeScript module:
+
+```bash
+pnpx jsr:@kraken/ink/cli convert src/styles.css src/lib/styles.ts
+```
+
+The generated module exports a `new ink()` builder. Import it somewhere your app
+loads, or import the default export and use it alongside your other Ink styles.
+
 ## Vite setup
 
 ```ts

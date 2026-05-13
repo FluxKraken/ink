@@ -1460,6 +1460,8 @@ const CONFIG_KEYS = new Set([
   "variant",
   "variantGlobal",
   "defaults",
+  "tailwind",
+  "tailwindCss",
 ]);
 
 function normalizeConfigKey(key: string): string {
@@ -1518,6 +1520,10 @@ type InkBuilder<
   variant: V | undefined;
   /** Default variant selections applied when no explicit selection is given. */
   defaults: VariantSelection<V> | undefined;
+  /** Tailwind CSS config objects emitted into the global stylesheet. */
+  tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
+  /** Pre-serialized Tailwind/global CSS emitted into the global stylesheet. */
+  tailwindCss: readonly string[] | undefined;
   /** Register a container preset for `@set` and `@<name>` shorthand at runtime. */
   addContainer(container: ContainerDefinitionInput): InkBuilder<T, V>;
   /** Add styles or external CSS files to the global stylesheet. */
@@ -1543,6 +1549,10 @@ type InkSimpleBuilder<
   variant: V | undefined;
   /** Default variant selections applied when no explicit selection is given. */
   defaults: SimpleVariantSelection<V> | undefined;
+  /** Tailwind CSS config objects emitted into the global stylesheet. */
+  tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
+  /** Pre-serialized Tailwind/global CSS emitted into the global stylesheet. */
+  tailwindCss: readonly string[] | undefined;
   /** Register a container preset for `@set` and `@<name>` shorthand at runtime. */
   addContainer(container: ContainerDefinitionInput): InkSimpleBuilder<V>;
   /** Add styles or external CSS files to the global stylesheet. */

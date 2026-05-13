@@ -2501,7 +2501,7 @@ export function findNewInkDeclarations(code: string): NewInkDeclaration[] {
 
     const assignments: NewInkAssignment[] = [];
     const assignmentMatcher = new RegExp(
-      `\\b${varName}\\.(base|global|themes|fonts|root|rootVars|variant|defaults)\\s*=\\s*`,
+      `\\b${varName}\\.(base|global|themes|fonts|root|rootVars|variant|defaults|tailwind|tailwindCss)\\s*=\\s*`,
       "g",
     );
     assignmentMatcher.lastIndex = declEnd;

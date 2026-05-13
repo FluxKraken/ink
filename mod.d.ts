@@ -144,6 +144,8 @@ type InkBuilder<
     rootVars: readonly RootVarInput[] | undefined;
     variant: V | undefined;
     defaults: VariantSelection<V> | undefined;
+    tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
+    tailwindCss: readonly string[] | undefined;
     addContainer: (
       container: {
         name: string;
@@ -167,6 +169,8 @@ type InkSimpleBuilder<V extends SimpleVariantSheet | undefined> =
     rootVars: readonly RootVarInput[] | undefined;
     variant: V | undefined;
     defaults: SimpleVariantSelection<V> | undefined;
+    tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
+    tailwindCss: readonly string[] | undefined;
     addContainer: (
       container: {
         name: string;
