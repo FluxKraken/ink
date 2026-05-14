@@ -1153,6 +1153,13 @@ function toCssRule(
 ): string {
   const parts: string[] = [];
   for (const [name, value] of Object.entries(declaration)) {
+    if (name === "@apply") {
+      const classList = Array.isArray(value) ? value.join(" ") : String(value);
+      if (classList.trim().length > 0) {
+        parts.push(`@apply ${classList.trim()}`);
+      }
+      continue;
+    }
     parts.push(toCssDeclaration(name, value, options));
   }
   return `${selector}{${parts.join(";")}}`;

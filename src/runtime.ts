@@ -438,6 +438,41 @@ function prefixNestedTailwindClassNames(
   return prefixTailwindVariantClasses(classNames, variant);
 }
 
+function isCssAtRuleKey(key: string): boolean {
+  return key.startsWith("@") || key.startsWith("!@") || key.startsWith("$");
+}
+
+function addTailwindApplyDeclaration(
+  declaration: StyleDeclaration,
+  classNames: readonly string[] | undefined,
+): StyleDeclaration {
+  if (!classNames || classNames.length === 0) {
+    return declaration;
+  }
+
+  const classList = classNames
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .join(" ");
+  if (classList.length === 0) {
+    return declaration;
+  }
+
+  const existing = declaration["@apply"];
+  const existingClassList = typeof existing === "string"
+    ? existing.trim()
+    : Array.isArray(existing)
+    ? existing.join(" ").trim()
+    : "";
+
+  return {
+    ...declaration,
+    "@apply": existingClassList.length > 0
+      ? `${existingClassList} ${classList}`
+      : classList,
+  };
+}
+
 function isStyleDeclarationObject(value: unknown): value is StyleDeclaration {
   if (
     typeof value !== "object" ||
@@ -506,6 +541,7 @@ function normalizeStyleDeclarationInput(
     containers?: Record<string, { type?: string; rule: string }>;
     allowTailwind?: boolean;
   } = {},
+  tailwindMode: "class" | "css" = "class",
 ): ResolvedStyleDefinition {
   const allowTailwind = options.allowTailwind !== false;
 
@@ -514,7 +550,7 @@ function normalizeStyleDeclarationInput(
     for (const entry of input) {
       merged = mergeResolvedStyleDefinitions(
         merged,
-        normalizeStyleDeclarationInput(entry, options),
+        normalizeStyleDeclarationInput(entry, options, tailwindMode),
       );
     }
     return merged;
@@ -524,6 +560,14 @@ function normalizeStyleDeclarationInput(
     if (!allowTailwind && (input.tailwindClassNames?.length ?? 0) > 0) {
       throw new Error(
         'tw() can only be used as a full style value or on a top-level "@apply" directive.',
+      );
+    }
+    if (tailwindMode === "css") {
+      return createResolvedStyleDefinition(
+        addTailwindApplyDeclaration(
+          input.declaration,
+          input.tailwindClassNames,
+        ),
       );
     }
 
@@ -537,6 +581,11 @@ function normalizeStyleDeclarationInput(
     if (!allowTailwind) {
       throw new Error(
         'tw() can only be used as a full style value or on a top-level "@apply" directive.',
+      );
+    }
+    if (tailwindMode === "css") {
+      return createResolvedStyleDefinition(
+        addTailwindApplyDeclaration({}, input.classNames),
       );
     }
 
@@ -557,6 +606,13 @@ function normalizeStyleDeclarationInput(
         normalizedDeclaration,
         applyValue.declaration,
       );
+      if (tailwindMode === "css") {
+        normalizedDeclaration = addTailwindApplyDeclaration(
+          normalizedDeclaration,
+          applyValue.tailwindClassNames,
+        );
+        continue;
+      }
       tailwindClassNames = [
         ...(tailwindClassNames ?? []),
         ...(applyValue.tailwindClassNames ?? []),
@@ -594,9 +650,13 @@ function normalizeStyleDeclarationInput(
           ...options,
           allowTailwind,
         },
+        isCssAtRuleKey(key) || tailwindMode === "css" ? "css" : "class",
       );
       (normalizedDeclaration as Record<string, unknown>)[key] =
         nested.declaration;
+      if (isCssAtRuleKey(key) || tailwindMode === "css") {
+        continue;
+      }
       tailwindClassNames = [
         ...(tailwindClassNames ?? []),
         ...(prefixNestedTailwindClassNames(key, nested.tailwindClassNames) ??
@@ -852,6 +912,9 @@ function mergeInlineDeclarations(
   const merged: Record<string, StyleValue> = {};
   for (const declaration of declarations) {
     for (const [name, value] of Object.entries(declaration)) {
+      if (name === "@apply") {
+        continue;
+      }
       if (!isInlineStyleValue(value)) {
         continue;
       }

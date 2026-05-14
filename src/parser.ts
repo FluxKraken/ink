@@ -840,6 +840,41 @@ function prefixNestedTailwindClassNames(
   return prefixTailwindVariantClasses(classNames, variant);
 }
 
+function isCssAtRuleKey(key: string): boolean {
+  return key.startsWith("@") || key.startsWith("!@") || key.startsWith("$");
+}
+
+function addTailwindApplyDeclaration(
+  declaration: StyleDeclaration,
+  classNames: readonly string[] | undefined,
+): StyleDeclaration {
+  if (!classNames || classNames.length === 0) {
+    return declaration;
+  }
+
+  const classList = classNames
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .join(" ");
+  if (classList.length === 0) {
+    return declaration;
+  }
+
+  const existing = declaration["@apply"];
+  const existingClassList = typeof existing === "string"
+    ? existing.trim()
+    : Array.isArray(existing)
+    ? existing.join(" ").trim()
+    : "";
+
+  return {
+    ...declaration,
+    "@apply": existingClassList.length > 0
+      ? `${existingClassList} ${classList}`
+      : classList,
+  };
+}
+
 function identifierReferenceToCssLiteral(value: unknown): string | null {
   if (!isIdentifierReference(value) || value.path.length !== 1) {
     return null;
@@ -1109,10 +1144,19 @@ function normalizeStyleDeclaration(
   value: unknown,
   options: ParseInkOptions,
   allowTailwind = true,
+  tailwindMode: "class" | "css" = "class",
 ): ResolvedStyleDefinition | null {
   if (isResolvedStyleDefinition(value)) {
     if (!allowTailwind && (value.tailwindClassNames?.length ?? 0) > 0) {
       return null;
+    }
+    if (tailwindMode === "css") {
+      return createResolvedStyleDefinition(
+        addTailwindApplyDeclaration(
+          value.declaration,
+          value.tailwindClassNames,
+        ),
+      );
     }
     return createResolvedStyleDefinition(
       value.declaration,
@@ -1121,6 +1165,13 @@ function normalizeStyleDeclaration(
   }
 
   if (isTailwindClassValue(value)) {
+    if (tailwindMode === "css") {
+      return allowTailwind
+        ? createResolvedStyleDefinition(
+          addTailwindApplyDeclaration({}, value.classNames),
+        )
+        : null;
+    }
     return allowTailwind
       ? createResolvedStyleDefinition({}, value.classNames)
       : null;
@@ -1133,6 +1184,7 @@ function normalizeStyleDeclaration(
         item,
         options,
         allowTailwind,
+        tailwindMode,
       );
       if (!declaration) {
         return null;
@@ -1167,6 +1219,13 @@ function normalizeStyleDeclaration(
         mergedDeclaration,
         declaration.declaration,
       );
+      if (tailwindMode === "css") {
+        mergedDeclaration = addTailwindApplyDeclaration(
+          mergedDeclaration,
+          declaration.tailwindClassNames,
+        );
+        continue;
+      }
       tailwindClassNames = [
         ...(tailwindClassNames ?? []),
         ...(declaration.tailwindClassNames ?? []),
@@ -1199,11 +1258,15 @@ function normalizeStyleDeclaration(
       declarationValue,
       options,
       allowTailwind,
+      isCssAtRuleKey(key) || tailwindMode === "css" ? "css" : "class",
     );
     if (!nested) {
       return null;
     }
     mergedDeclaration[key] = nested.declaration;
+    if (isCssAtRuleKey(key) || tailwindMode === "css") {
+      continue;
+    }
     const prefixedTailwind = prefixNestedTailwindClassNames(
       key,
       nested.tailwindClassNames,

@@ -1224,6 +1224,34 @@ Deno.test("parser prefixes nested hover @apply tw() classes", () => {
   ]);
 });
 
+Deno.test("parser keeps @apply tw() inside breakpoint rules as CSS", () => {
+  const parsed = parseInkCallArguments(`{
+    base: {
+      content: {
+        gridArea: "content",
+        "@main": {
+          "@apply": tw("prose max-w-none")
+        },
+        "@xs": {
+          textAlign: "justify"
+        }
+      }
+    }
+  }`);
+
+  assert(parsed !== null);
+  assertEquals(styleDeclarationOf(parsed.base.content), {
+    gridArea: "content",
+    "@main": {
+      "@apply": "prose max-w-none",
+    },
+    "@xs": {
+      textAlign: "justify",
+    },
+  });
+  assertEquals(parsed.base.content.tailwindClassNames, undefined);
+});
+
 Deno.test("parser collects @import paths from stylesheet blocks", () => {
   const parsed = parseInkCallArguments(`{
     global: {
@@ -2988,6 +3016,60 @@ Deno.test("extracts nested hover @apply tw() class markers at build time", () =>
 
   const css = load(VIRTUAL_ID) as string;
   assert(!css.includes("underline-offset"));
+});
+
+Deno.test("extracts @apply tw() inside configured breakpoint aliases", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { breakpoints: { main: "64rem", xs: "30rem" } };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink, { tw } from "@kraken/ink";\n` +
+      `import type { ReactNode } from "react";\n` +
+      `interface Props { children: ReactNode; }\n` +
+      `const styles = new ink();\n` +
+      `styles.base = {\n` +
+      `  content: {\n` +
+      `    gridArea: "content",\n` +
+      `    "@main": {\n` +
+      `      "@apply": tw("prose max-w-none"),\n` +
+      `    },\n` +
+      `    "@xs": {\n` +
+      `      textAlign: "justify",\n` +
+      `    },\n` +
+      `  },\n` +
+      `};\n` +
+      `export const Content = ({ children }: Props) => {\n` +
+      `  return <main className={styles.content()}>{children}</main>;\n` +
+      `};`;
+    const transformed = transform(moduleCode, `${root}/src/Content.tsx`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(css, /\.ink_[a-z0-9]+\{grid-area:content\}/);
+    assertMatch(
+      css,
+      /@media \(width >= 64rem\)\{\.ink_[a-z0-9]+\{@apply prose max-w-none\}\}/,
+    );
+    assertMatch(
+      css,
+      /@media \(width >= 30rem\)\{\.ink_[a-z0-9]+\{text-align:justify\}\}/,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
 });
 
 Deno.test("extracts @import stylesheet imports with relative paths", () => {
@@ -5781,6 +5863,81 @@ Deno.test("runtime accessors support nested hover @apply tw() styles", () => {
     "hover:underline hover:underline-offset-6",
   );
   assertEquals(styles().navLink.style(), "");
+});
+
+Deno.test("runtime emits @apply tw() inside breakpoint rules", () => {
+  type FakeStyleTag = {
+    id: string;
+    textContent: string;
+    appendChild: (node: unknown) => void;
+  };
+
+  const globals = globalThis as Record<string, unknown>;
+  const originalDocument = globals.document;
+  const tags = new Map<string, FakeStyleTag>();
+  const fakeDocument = {
+    getElementById(id: string) {
+      return tags.get(id) ?? null;
+    },
+    createElement(_tag: "style"): FakeStyleTag {
+      return {
+        id: "",
+        textContent: "",
+        appendChild(node: unknown) {
+          this.textContent += String(node);
+        },
+      };
+    },
+    createTextNode(text: string) {
+      return text;
+    },
+    head: {
+      appendChild(node: unknown) {
+        const tag = node as FakeStyleTag;
+        tags.set(tag.id, tag);
+      },
+    },
+  };
+
+  globals.document = fakeDocument;
+
+  try {
+    const styles = new (ink as any)(undefined, undefined, {
+      breakpoints: { main: "64rem", xs: "30rem" },
+    });
+    styles.base = {
+      content: {
+        gridArea: "content",
+        "@main": {
+          "@apply": tw("prose max-w-none"),
+        },
+        "@xs": {
+          textAlign: "justify",
+        },
+      },
+    };
+
+    const className = styles().content();
+    assertMatch(className, /ink_[a-z0-9]+/);
+    assertEquals(styles().content.style(), "grid-area:content");
+
+    const styleTag = fakeDocument.getElementById("__ink_runtime_styles");
+    const text = styleTag?.textContent ?? "";
+    assertMatch(
+      text,
+      /@media \(width >= 64rem\)\{\.ink_[a-z0-9]+\{@apply prose max-w-none\}\}/,
+    );
+    assertMatch(
+      text,
+      /@media \(width >= 30rem\)\{\.ink_[a-z0-9]+\{text-align:justify\}\}/,
+    );
+  } finally {
+    if (originalDocument !== undefined) {
+      globals.document = originalDocument;
+    } else {
+      delete globals.document;
+    }
+  }
 });
 
 Deno.test("new ink() runtime with variants and defaults", () => {
