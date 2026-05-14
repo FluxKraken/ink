@@ -220,6 +220,63 @@ export interface ResolvedTailwindConfigCss {
   css: string[];
 }
 
+/** Style resolution mode used by the Vite plugin. */
+export type InkResolution = "static" | "dynamic" | "hybrid";
+
+/** Debug logging options accepted by `ink.config.ts`. */
+export interface InkConfigDebugOptions {
+  /** Log runtime fallback decisions. */
+  logDynamic?: boolean;
+  /** Log static extraction decisions. */
+  logStatic?: boolean;
+}
+
+/** Container preset accepted by `ink.config.ts`. */
+export interface InkConfigContainer {
+  /** Optional CSS container type. */
+  type?: string;
+  /** Container query rule used by matching aliases. */
+  rule: string;
+}
+
+/** Project-wide Ink config loaded from `ink.config.ts`. */
+export interface InkConfigFile {
+  /** Additional directories whose modules should be transformed by the Vite plugin. */
+  include?: string | readonly string[];
+  /** CSS imports emitted into the virtual stylesheet. */
+  imports?: readonly string[];
+  /** Explicit CSS layer order emitted as `@layer a, b, c;`. */
+  layers?: readonly string[];
+  /** Default unit appended to numeric style values. */
+  defaultUnit?: string;
+  /** Theme expansion strategy used for project-wide themes. */
+  themeMode?: ThemeMode;
+  /** Static extraction strategy used by the Vite plugin. */
+  resolution?: InkResolution;
+  /** Static/dynamic transform debug logging. */
+  debug?: InkConfigDebugOptions;
+  /** Named breakpoint aliases used by `@md`, `!@md`, and ranges. */
+  breakpoints?: Record<string, string | number>;
+  /** Named container presets used by `@set`, `@card`, and container ranges. */
+  containers?: Record<string, InkConfigContainer> | readonly (
+    InkConfigContainer & { name: string }
+  )[];
+  /** Named utility declarations available to `@apply`. */
+  utilities?: StyleSheet;
+  /** Project-wide themes emitted into the shared stylesheet. */
+  themes?: ImportedThemesInput;
+  /** Project-wide Fontsource fonts emitted as imports and `--font-*` variables. */
+  fonts?: readonly FontSourceInput[];
+}
+
+/** Type a project-wide Ink config without changing its runtime value. */
+export function defineInkConfig<const T extends InkConfigFile>(config: T): T {
+  return config;
+}
+
+/** Alias for older config examples. Prefer {@link defineInkConfig}. */
+export const defineCssConfig = defineInkConfig;
+
 /** Singular import input item. */
 export type SingularImportInput =
   | string

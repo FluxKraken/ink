@@ -1635,6 +1635,28 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
   `);
 });
 
+Deno.test("published types accept project config Fontsource fonts", () => {
+  assertPackageTypesSucceed(`
+    import { defineCssConfig, defineInkConfig, type InkConfigFile } from "@kraken/ink";
+
+    export default defineInkConfig({
+      fonts: [{ name: "Bungee", varName: "display" }],
+      breakpoints: { md: "48rem" },
+    });
+
+    const config: InkConfigFile = defineCssConfig({
+      fonts: [{
+        name: "Inter Variable",
+        varName: "body",
+        package: "@fontsource-variable/inter",
+        fallback: ["system-ui", "sans-serif"],
+      }],
+    });
+
+    config.fonts?.[0]?.name;
+  `);
+});
+
 Deno.test("published types accept ThemeAdvanced custom theme definitions", () => {
   assertPackageTypesSucceed(`
     import ink, { ThemeAdvanced, type ThemeAdvancedInput } from "@kraken/ink";
@@ -3977,9 +3999,10 @@ Deno.test("loads ink.config.ts Fontsource fonts into the shared stylesheet", () 
     Deno.mkdirSync(`${root}/src`, { recursive: true });
     Deno.writeTextFileSync(
       `${root}/ink.config.ts`,
-      `export default {\n` +
+      `import { defineInkConfig } from "@kraken/ink";\n` +
+        `export default defineInkConfig({\n` +
         `  fonts: [{ name: "Bungee", varName: "display" }],\n` +
-        `};\n`,
+        `});\n`,
     );
 
     const plugin = inkVite();

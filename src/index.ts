@@ -9,7 +9,16 @@ import type {
   InkSimpleBuilder,
 } from "./runtime.js";
 import { inkVite } from "./vite.js";
-import { cVar, font, Theme, ThemeAdvanced, tVar, tw } from "./shared.js";
+import {
+  cVar,
+  defineCssConfig,
+  defineInkConfig,
+  font,
+  Theme,
+  ThemeAdvanced,
+  tVar,
+  tw,
+} from "./shared.js";
 
 type Ink = typeof runtimeInk & {
   (input: Parameters<typeof tw>[0]): ReturnType<typeof tw>;
@@ -22,6 +31,8 @@ type Ink = typeof runtimeInk & {
   ThemeAdvanced: typeof ThemeAdvanced;
   tw: typeof tw;
   tVar: typeof tVar;
+  defineInkConfig: typeof defineInkConfig;
+  defineCssConfig: typeof defineCssConfig;
 };
 
 /**
@@ -37,6 +48,8 @@ const ink = Object.assign(runtimeInk, {
   ThemeAdvanced,
   tw,
   tVar,
+  defineInkConfig,
+  defineCssConfig,
 }) as Ink;
 
 /** Default export for the Ink runtime API. */
@@ -55,6 +68,10 @@ export { ThemeAdvanced };
 export { tw };
 /** Named export for referencing theme-backed CSS variables. */
 export { tVar };
+/** Named export for typing `ink.config.ts` files. */
+export { defineInkConfig };
+/** Backwards-compatible config helper alias. Prefer `defineInkConfig`. */
+export { defineCssConfig };
 /** Re-exported Vite plugin options. */
 export type { InkVitePluginOptions } from "./vite.js";
 /** Re-exported builder type. */
@@ -103,3 +120,7 @@ export type { ThemeAdvancedInput } from "./shared.js";
 export type { ThemeMode } from "./shared.js";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./shared.js";
+/** Project-wide config shape accepted by `ink.config.ts`. */
+export type { InkConfigFile } from "./shared.js";
+/** Style resolution mode used by the Vite plugin. */
+export type { InkResolution } from "./shared.js";

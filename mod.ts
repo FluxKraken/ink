@@ -18,6 +18,10 @@ export { ThemeAdvanced } from "./src/index.ts";
 export { tw } from "./src/index.ts";
 /** Named export for referencing theme-backed CSS variables. */
 export { tVar } from "./src/index.ts";
+/** Named export for typing `ink.config.ts` files. */
+export { defineInkConfig } from "./src/index.ts";
+/** Backwards-compatible config helper alias. Prefer `defineInkConfig`. */
+export { defineCssConfig } from "./src/index.ts";
 /** Re-exported Vite plugin options type. */
 export type { InkVitePluginOptions } from "./src/index.ts";
 /** Style object for a single class name. */
@@ -68,3 +72,7 @@ export type { ThemeAdvancedInput } from "./src/index.ts";
 export type { ThemeMode } from "./src/index.ts";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./src/index.ts";
+/** Project-wide config shape accepted by `ink.config.ts`. */
+export type { InkConfigFile } from "./src/index.ts";
+/** Style resolution mode used by the Vite plugin. */
+export type { InkResolution } from "./src/index.ts";

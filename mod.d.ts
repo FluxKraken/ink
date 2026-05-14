@@ -2,9 +2,13 @@ import {
   ApplyInput,
   ContainerSetInput,
   CssVarRef,
+  defineCssConfig,
+  defineInkConfig,
   font,
   FontHelper,
   FontSourceInput,
+  InkConfigFile,
+  InkResolution,
   ImportedThemesInput,
   LayeredApplyInput,
   PrimitiveStyleValue,
@@ -235,6 +239,10 @@ export type { ThemeAdvancedInput };
 export type { ThemeMode };
 /** Re-exported imported theme map type. */
 export type { ImportedThemesInput };
+/** Project-wide config shape accepted by `ink.config.ts`. */
+export type { InkConfigFile };
+/** Style resolution mode used by the Vite plugin. */
+export type { InkResolution };
 /** Re-exported Theme constructor. */
 export { Theme };
 /** Re-exported ThemeAdvanced constructor. */
@@ -277,6 +285,10 @@ export interface Ink {
   tw: typeof tw;
   /** Theme variable proxy. */
   tVar: Record<string, CssVarRef>;
+  /** Type a project-wide Ink config. */
+  defineInkConfig: typeof defineInkConfig;
+  /** Backwards-compatible config helper alias. Prefer `defineInkConfig`. */
+  defineCssConfig: typeof defineCssConfig;
 }
 
 /** Default export for the Ink runtime API. */
@@ -298,3 +310,7 @@ export { ThemeAdvanced };
 export { tw };
 /** Named export for referencing theme-backed CSS variables. */
 export const tVar: Record<string, CssVarRef>;
+/** Named export for typing `ink.config.ts` files. */
+export { defineInkConfig };
+/** Backwards-compatible config helper alias. Prefer `defineInkConfig`. */
+export { defineCssConfig };

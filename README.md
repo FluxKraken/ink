@@ -280,6 +280,18 @@ styles.base = {
 };
 ```
 
+For project-wide fonts, put the same entries in `ink.config.ts`:
+
+```ts
+import { defineInkConfig } from "@kraken/ink";
+
+export default defineInkConfig({
+  fonts: [
+    { name: "Bungee", varName: "display" },
+  ],
+});
+```
+
 `varName: "display"` creates `--font-display`, so `font.display` resolves to
 `var(--font-display)`. By default Ink imports `@fontsource/<slug>` and appends
 `system-ui` as the fallback family. Use `fallback` or `package` when a font
@@ -622,17 +634,21 @@ styles.base = {
 };
 ```
 
-### Breakpoints, containers, layers, and utilities in `ink.config.ts`
+### Project config in `ink.config.ts`
 
 Put project-wide config in the repository root:
 
 ```ts
 // ink.config.ts
+import { defineInkConfig } from "@kraken/ink";
 import "./src/global.css";
 
-export default {
+export default defineInkConfig({
   include: ["./packages/ui"],
   imports: ["./src/theme.css"],
+  fonts: [
+    { name: "Bungee", varName: "display" },
+  ],
   layers: ["reset", "theme", "components", "utilities"],
   defaultUnit: "rem",
   themeMode: "color-scheme",
@@ -654,7 +670,7 @@ export default {
       boxShadow: "0 12px 40px rgb(0 0 0 / 0.12)",
     },
   },
-};
+});
 ```
 
 `themeMode: "color-scheme"` uses `themes.default` as the light/root theme and
@@ -694,6 +710,7 @@ What each config field does:
 - `breakpoints` powers `@md`, `!@md`, and `@(sm,lg)`
 - `containers` powers `@set`, `@card`, and container ranges
 - `utilities` creates global `.u-*` utility classes and named `@apply` targets
+- `fonts` emits Fontsource `@import` rules and `--font-*` variables for `font.*`
 - `imports` and side-effect CSS imports become `@import` rules in the virtual
   stylesheet
 
