@@ -88,6 +88,8 @@ export type { StyleDeclaration } from "./shared.js";
 export type { StyleSheet } from "./shared.js";
 /** CSS value accepted by style declarations. */
 export type { StyleValue } from "./shared.js";
+/** Object form accepted by `fontVariationSettings`. */
+export type { FontVariationSettingsObject } from "./shared.js";
 /** Fontsource font entry accepted by `fonts`. */
 export type { FontSourceInput } from "./shared.js";
 /** Callable font helper type. */

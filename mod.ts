@@ -40,6 +40,8 @@ export type { InkSimpleStyleAccessor } from "./src/index.ts";
 export type { StyleSheet } from "./src/index.ts";
 /** CSS value accepted by style declarations. */
 export type { StyleValue } from "./src/index.ts";
+/** Object form accepted by `fontVariationSettings`. */
+export type { FontVariationSettingsObject } from "./src/index.ts";
 /** Fontsource font entry accepted by `fonts`. */
 export type { FontSourceInput } from "./src/index.ts";
 /** Callable font helper type. */

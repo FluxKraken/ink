@@ -2,6 +2,15 @@ import type * as CSS from "csstype";
 
 /** Primitive CSS value before unit formatting. */
 export type PrimitiveStyleValue = string | number;
+/** Single font variation axis value keyed by its OpenType axis tag. */
+export type FontVariationSettingsObject = Record<
+  string,
+  PrimitiveStyleValue | CssVarRef
+>;
+/** Array entry accepted by the `fontVariationSettings` declaration. */
+export type FontVariationSettingsEntry =
+  | string
+  | FontVariationSettingsObject;
 
 type NodeRequire = ((id: string) => unknown) & {
   resolve?: (id: string) => string;
@@ -55,6 +64,13 @@ export type StyleValue =
   | PrimitiveStyleValue
   | CssVarRef
   | readonly (PrimitiveStyleValue | CssVarRef)[];
+/** CSS value accepted specifically by `fontVariationSettings`. */
+export type FontVariationSettingsValue =
+  | StyleValue
+  | FontVariationSettingsObject
+  | readonly FontVariationSettingsEntry[];
+/** CSS value accepted by style declarations. */
+export type DeclarationStyleValue = StyleValue | FontVariationSettingsValue;
 /** Input accepted by {@link tw}. */
 export type TailwindClassInput = string | readonly string[];
 /** Tailwind class marker used by `@apply` and direct style entries. */
@@ -91,9 +107,19 @@ export type ApplyInput =
   | LayeredApplyInput
   | readonly ApplyInput[];
 type CssPropertyName = keyof CSS.Properties;
+type KnownCssPropertyName = {
+  [Property in CssPropertyName]: string extends Property ? never
+    : number extends Property ? never
+    : symbol extends Property ? never
+    : Property;
+}[CssPropertyName];
 /** Known camelCase CSS property names surfaced for TypeScript completions. */
 type CssPropertyDeclaration = {
-  [Property in CssPropertyName]?: StyleValue;
+  [Property in KnownCssPropertyName as Property extends "fontVariationSettings"
+    ? never
+    : Property]?: StyleValue;
+} & {
+  fontVariationSettings?: FontVariationSettingsValue;
 };
 /** CSS custom properties emitted on `:root` (optionally within a layer). */
 export type RootVarInput =
@@ -147,11 +173,11 @@ export type FontHelper =
     readonly [token: string]: CssVarRef;
   };
 /** Flat style object with only CSS declarations. */
-export type PseudoStyleDeclaration = Record<string, StyleValue>;
+export type PseudoStyleDeclaration = Record<string, DeclarationStyleValue>;
 /** Recursive style object supporting nested selectors and at-rules. */
 export type NestedStyleDeclaration = CssPropertyDeclaration & {
   [key: string]:
-    | StyleValue
+    | DeclarationStyleValue
     | NestedStyleDeclaration
     | ApplyInput
     | SetInput;
@@ -1071,7 +1097,7 @@ export function createClassName(
  */
 export function toCssDeclaration(
   name: string,
-  value: StyleValue,
+  value: DeclarationStyleValue,
   options?: CssSerializationOptions,
 ): string {
   const property = camelToKebab(name);
@@ -1140,6 +1166,59 @@ function isNestedStyleDeclaration(
     !Array.isArray(value) &&
     !isCssVarRef(value)
   );
+}
+
+function isFontVariationSettingsProperty(property: string): boolean {
+  return property === "font-variation-settings";
+}
+
+function isFontVariationAxisValue(
+  value: unknown,
+): value is PrimitiveStyleValue | CssVarRef {
+  return typeof value === "string" || typeof value === "number" ||
+    isCssVarRef(value);
+}
+
+function isFontVariationSettingsObject(
+  value: unknown,
+): value is FontVariationSettingsObject {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !isCssVarRef(value) &&
+    Object.entries(value).every(([axis, axisValue]) =>
+      axis.trim().length > 0 && isFontVariationAxisValue(axisValue)
+    )
+  );
+}
+
+function isFontVariationSettingsValue(
+  value: unknown,
+): value is FontVariationSettingsValue {
+  if (
+    typeof value === "string" || typeof value === "number" ||
+    isCssVarRef(value) || isFontVariationSettingsObject(value)
+  ) {
+    return true;
+  }
+
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  return value.every((entry) =>
+    typeof entry === "string" || isFontVariationSettingsObject(entry)
+  );
+}
+
+function isDeclarationStyleValue(
+  property: string,
+  value: unknown,
+): value is DeclarationStyleValue {
+  return isThemeStyleValue(value) ||
+    (isFontVariationSettingsProperty(property) &&
+      isFontVariationSettingsValue(value));
 }
 
 function toPseudoSelectorIfShorthand(key: string): string | null {
@@ -1368,13 +1447,14 @@ function collectCssRules(
   const nested: Array<[string, NestedStyleDeclaration]> = [];
 
   for (const [name, value] of Object.entries(declaration)) {
-    if (isNestedStyleDeclaration(value)) {
-      nested.push([name, value]);
+    if (isDeclarationStyleValue(camelToKebab(name), value)) {
+      base[name] = value;
       continue;
     }
 
-    if (isThemeStyleValue(value)) {
-      base[name] = value;
+    if (isNestedStyleDeclaration(value)) {
+      nested.push([name, value]);
+      continue;
     }
   }
 
@@ -1456,13 +1536,14 @@ function collectGlobalCssRules(
     const nestedDeclarations: PseudoStyleDeclaration = {};
 
     for (const [name, value] of Object.entries(declaration)) {
-      if (isNestedStyleDeclaration(value)) {
-        collectGlobalCssRules(name, value, nestedAtRules, rules, options);
+      if (isDeclarationStyleValue(camelToKebab(name), value)) {
+        nestedDeclarations[name] = value;
         continue;
       }
 
-      if (isThemeStyleValue(value)) {
-        nestedDeclarations[name] = value;
+      if (isNestedStyleDeclaration(value)) {
+        collectGlobalCssRules(name, value, nestedAtRules, rules, options);
+        continue;
       }
     }
 
@@ -1653,7 +1734,7 @@ function toTailwindDeclarationBlock(value: unknown): string {
       continue;
     }
 
-    if (isThemeStyleValue(declarationValue)) {
+    if (isDeclarationStyleValue(camelToKebab(name), declarationValue)) {
       parts.push(`${toCssDeclaration(name, declarationValue)};`);
       continue;
     }
@@ -1964,6 +2045,70 @@ function formatGridTemplateAreasValue(value: string): string {
   return JSON.stringify(value);
 }
 
+function formatFontVariationAxisName(axis: string): string {
+  const trimmed = axis.trim();
+  if (trimmed.length === 0) {
+    throw new Error("fontVariationSettings axis names must not be empty.");
+  }
+
+  if (isQuotedCssString(trimmed)) {
+    return trimmed;
+  }
+
+  return `'${trimmed.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+}
+
+function formatFontVariationCssVarRef(value: CssVarRef): string {
+  if (value.fallback === undefined) {
+    return `var(${value.name})`;
+  }
+  return `var(${value.name}, ${String(value.fallback)})`;
+}
+
+function formatFontVariationAxisValue(
+  value: PrimitiveStyleValue | CssVarRef,
+): string {
+  if (isCssVarRef(value)) {
+    return formatFontVariationCssVarRef(value);
+  }
+  return String(value);
+}
+
+function formatFontVariationSettingsObject(
+  value: FontVariationSettingsObject,
+): string {
+  return Object.entries(value)
+    .map(([axis, axisValue]) =>
+      `${formatFontVariationAxisName(axis)} ${
+        formatFontVariationAxisValue(axisValue)
+      }`
+    )
+    .join(", ");
+}
+
+function formatFontVariationSettingsValue(
+  value: FontVariationSettingsValue,
+): string {
+  if (isFontVariationSettingsObject(value)) {
+    return formatFontVariationSettingsObject(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => {
+      if (isFontVariationSettingsObject(entry)) {
+        return formatFontVariationSettingsObject(entry);
+      }
+      return String(entry);
+    }).join(", ");
+  }
+
+  if (isCssVarRef(value)) {
+    return formatFontVariationCssVarRef(value);
+  }
+
+  return String(value);
+}
+
 function isTransitionTimingToken(value: string): boolean {
   return (
     /^-?\d*\.?\d+m?s$/i.test(value) ||
@@ -2008,9 +2153,13 @@ function shouldUseSpaceDelimitedTransitionValue(
 
 function formatStyleValue(
   property: string,
-  value: StyleValue,
+  value: DeclarationStyleValue,
   options?: CssSerializationOptions,
 ): string {
+  if (isFontVariationSettingsProperty(property)) {
+    return formatFontVariationSettingsValue(value);
+  }
+
   if (Array.isArray(value)) {
     if (
       property === "transition" && shouldUseSpaceDelimitedTransitionValue(value)

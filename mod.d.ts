@@ -4,6 +4,7 @@ import {
   CssVarRef,
   defineCssConfig,
   defineInkConfig,
+  FontVariationSettingsObject,
   font,
   FontHelper,
   FontSourceInput,
@@ -209,6 +210,8 @@ export type { InkSimpleStyleAccessor };
 export type { StyleSheet };
 /** Re-exported style value type. */
 export type { StyleValue };
+/** Object form accepted by `fontVariationSettings`. */
+export type { FontVariationSettingsObject };
 /** Fontsource font entry accepted by `fonts`. */
 export type { FontSourceInput };
 /** Callable font helper type. */

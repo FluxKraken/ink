@@ -753,6 +753,29 @@ Deno.test("toCssDeclaration and toCssRules support configurable defaultUnit", ()
   assert(rules.includes(".test{margin-block:2ch}"));
 });
 
+Deno.test("toCssDeclaration supports flexible font variation settings", () => {
+  assertEquals(
+    toCssDeclaration("fontVariationSettings", "'slnt' -10, 'wght' 100"),
+    "font-variation-settings:'slnt' -10, 'wght' 100",
+  );
+  assertEquals(
+    toCssDeclaration("fontVariationSettings", { slnt: -10, wght: 100 }),
+    "font-variation-settings:'slnt' -10, 'wght' 100",
+  );
+  assertEquals(
+    toCssDeclaration("fontVariationSettings", { slnt: "-10", wght: "100" }),
+    "font-variation-settings:'slnt' -10, 'wght' 100",
+  );
+  assertEquals(
+    toCssDeclaration("fontVariationSettings", ["'slnt' -10", "'wght' 100"]),
+    "font-variation-settings:'slnt' -10, 'wght' 100",
+  );
+  assertEquals(
+    toCssDeclaration("fontVariationSettings", [{ slnt: -10 }, { wght: 100 }]),
+    "font-variation-settings:'slnt' -10, 'wght' 100",
+  );
+});
+
 Deno.test("toCssDeclaration treats tokenized transition arrays as single shorthands", () => {
   assertEquals(
     toCssDeclaration("transition", [
@@ -1632,6 +1655,30 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
     };
 
     styles.header();
+  `);
+});
+
+Deno.test("published types accept flexible font variation settings", () => {
+  assertPackageTypesSucceed(`
+    import ink from "@kraken/ink";
+
+    const styles = new ink();
+    styles.base = {
+      text: {
+        fontVariationSettings: { slnt: -10, wght: 100 },
+      },
+      label: {
+        fontVariationSettings: { slnt: "-10", wght: "100" },
+      },
+      title: {
+        fontVariationSettings: ["'slnt' -10", "'wght' 100"],
+      },
+      badge: {
+        fontVariationSettings: [{ slnt: -10 }, { wght: 100 }],
+      },
+    };
+
+    styles.text();
   `);
 });
 
@@ -2830,6 +2877,34 @@ Deno.test("extracts comma-delimited property arrays at build time", () => {
   assertMatch(
     css,
     /\.ink_[a-z0-9]+\{font-family:system-ui, sans-serif;transition:opacity 0\.2s, color 0\.3s\}/,
+  );
+});
+
+Deno.test("extracts flexible font variation settings at build time", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const moduleCode = `import ink from "@kraken/ink";\n` +
+    `export const styles = ink({\n` +
+    `  base: {\n` +
+    `    textEl: {\n` +
+    `      fontVariationSettings: [\n` +
+    `        { slnt: -10 },\n` +
+    `        { wght: "100" },\n` +
+    `      ],\n` +
+    `    }\n` +
+    `  }\n` +
+    `});`;
+  const transformed = transform(moduleCode, "/app/src/lib/font-vars.ts");
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{font-variation-settings:'slnt' -10, 'wght' 100\}/,
   );
 });
 
