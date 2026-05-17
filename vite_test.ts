@@ -181,6 +181,7 @@ function assertPackageTypesSucceed(source: string): void {
 Deno.test("injects component CSS for direct ink usage in svelte", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
 
   const source = `<script lang="ts">\nimport ink from "@kraken/ink";\n` +
     `const styles = ink({ base: { card: { display: "grid", gap: "1rem" } } });\n` +
@@ -193,13 +194,16 @@ Deno.test("injects component CSS for direct ink usage in svelte", () => {
 
   const code = transformed.code as string;
   assert(code.includes('import "virtual:ink/styles.css";'));
-  assert(code.includes("<style>"));
-  assertMatch(code, /:global\(\.ink_[a-z0-9]+\)\{display:grid;gap:1rem\}/);
+  assert(!code.includes("<style>"));
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(css, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
 });
 
-Deno.test("svelte style block keeps @media outside :global wrappers", () => {
+Deno.test("svelte component CSS is extracted into virtual stylesheet", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
 
   const source = `<script lang="ts">\n` +
     `import ink from "@kraken/ink";\n` +
@@ -225,16 +229,20 @@ Deno.test("svelte style block keeps @media outside :global wrappers", () => {
   );
 
   const code = transformed.code as string;
-  assert(!code.includes(":global(@media"));
+  assert(code.includes('import "virtual:ink/styles.css";'));
+
+  const css = load(VIRTUAL_ID) as string;
+  assert(!css.includes(":global(@media"));
   assertMatch(
-    code,
-    /@media \(width < 70rem\)\{:global\(\.ink_[a-z0-9]+\)\{gap:0px\}\}/,
+    css,
+    /@media \(width < 70rem\)\{\.ink_[a-z0-9]+\{gap:0px\}\}/,
   );
 });
 
-Deno.test("merges ink component CSS into an existing svelte style block", () => {
+Deno.test("preserves existing svelte style block while extracting ink CSS", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
 
   const source = `<script lang="ts">\nimport ink from "@kraken/ink";\n` +
     `const styles = ink({ base: { card: { display: "grid", gap: "1rem" } } });\n` +
@@ -250,7 +258,9 @@ Deno.test("merges ink component CSS into an existing svelte style block", () => 
   const code = transformed.code as string;
   assertEquals((code.match(/<style\b/g) ?? []).length, 1);
   assert(code.includes(".card-shell { padding: 1rem; }"));
-  assertMatch(code, /:global\(\.ink_[a-z0-9]+\)\{display:grid;gap:1rem\}/);
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(css, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
 });
 
 Deno.test("injects virtual stylesheet import and extracts css for direct ink usage in astro", () => {
@@ -565,6 +575,7 @@ Deno.test("nested vite roots load parent ink.config.ts and transform vite-root s
 
     const plugin = inkVite();
     const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
     const configResolved = asHook(plugin.configResolved);
 
     configResolved({ root: viteRoot, resolve: { alias: [] } });
@@ -590,7 +601,9 @@ Deno.test("nested vite roots load parent ink.config.ts and transform vite-root s
     assert(code.includes('import "virtual:ink/styles.css";'));
     assert(code.includes('"defaultUnit":"rem"'));
     assert(!code.includes("new ink()"));
-    assertMatch(code, /:global\(\.ink_[a-z0-9]+\)\{display:grid;gap:1rem\}/);
+
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(css, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -3310,10 +3323,65 @@ Deno.test("extracts @import from svelte ink() into virtual global stylesheet", (
     const code = transformed.code as string;
     assert(code.includes('import "virtual:ink/styles.css";'));
     assert(!code.includes('@import "/src/lib/styles/reset.css";'));
-    assertMatch(code, /:global\(\.ink_[a-z0-9]+\)\{display:grid\}/);
 
     const css = load(VIRTUAL_ID) as string;
     assert(css.includes('@import "/src/lib/styles/reset.css";'));
+    assertMatch(css, /\.ink_[a-z0-9]+\{display:grid\}/);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("keeps svelte Tailwind config and component CSS in one virtual stylesheet", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib/styles`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/tailwind.ts`,
+      `export default {\n` +
+        `  import: ["tailwindcss"],\n` +
+        `  plugin: ["@tailwindcss/typography"],\n` +
+        `  themeInline: { "--font-sans": "'Inter Variable', sans-serif" },\n` +
+        `} as const;\n`,
+    );
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const layoutSource = `<script lang="ts">\n` +
+      `import ink from "@kraken/ink";\n` +
+      `import Tailwind from "../lib/styles/tailwind";\n` +
+      `const RootStyles = new ink();\n` +
+      `RootStyles.import([{ tailwind: Tailwind }]);\n` +
+      `</script>\n\n<slot />`;
+
+    const contentSource = `<script lang="ts">\n` +
+      `import ink, { tw } from "@kraken/ink";\n` +
+      `const styles = new ink();\n` +
+      `styles.base = {\n` +
+      `  content: {\n` +
+      `    "@apply": tw("prose max-w-none"),\n` +
+      `    gridArea: "content",\n` +
+      `  },\n` +
+      `};\n` +
+      `</script>\n\n<main class={styles.content()}></main>`;
+
+    assert(transform(layoutSource, `${root}/src/routes/+layout.svelte`));
+    assert(transform(contentSource, `${root}/src/lib/Content.svelte`));
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes('@import "tailwindcss";'));
+    assert(css.includes('@plugin "@tailwindcss/typography";'));
+    assert(
+      css.includes(
+        "@theme inline{--font-sans:'Inter Variable', sans-serif;}",
+      ),
+    );
+    assertMatch(css, /\.ink_[a-z0-9]+\{grid-area:content\}/);
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -3348,11 +3416,12 @@ Deno.test("extracts imported image assets used in new ink() global rules", () =>
 
     const code = transformed.code as string;
     assert(!code.includes("styles.global ="));
+    const css = load(VIRTUAL_ID) as string;
     assertMatch(
-      code,
-      /:global\(body\)\{background:url\("\/src\/lib\/assets\/bg\.png"\)\}/,
+      css,
+      /body\{background:url\("\/src\/lib\/assets\/bg\.png"\)\}/,
     );
-    assertMatch(code, /:global\(\.ink_[a-z0-9]+\)\{min-height:100vh\}/);
+    assertMatch(css, /\.ink_[a-z0-9]+\{min-height:100vh\}/);
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -3554,7 +3623,9 @@ Deno.test("new ink() resolves default-export barrel rules through directory alia
 
     const code = transformed.code as string;
     assert(!code.includes('@import "use strict";'));
-    assertMatch(code, /:global\(body\)\{background-color:white;color:black\}/);
+
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(css, /body\{background-color:white;color:black\}/);
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -6688,6 +6759,7 @@ Deno.test("vite watches statically imported theme modules used by new ink()", ()
     const plugin = inkVite();
     const configResolved = asHook(plugin.configResolved);
     const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
     const themesId = `${root}/src/lib/themes.ts`;
     const pageId = `${root}/src/routes/+page.svelte`;
 
@@ -6725,7 +6797,8 @@ Deno.test("vite watches statically imported theme modules used by new ink()", ()
     );
 
     assert(watched.includes(themesId));
-    assert((transformed.code as string).includes("--bg:black"));
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes("--bg:black"));
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -6737,6 +6810,7 @@ Deno.test("vite extracts font() helper values from imported theme modules", () =
     const plugin = inkVite();
     const configResolved = asHook(plugin.configResolved);
     const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
     const themesId = `${root}/src/lib/themes.ts`;
     const pageId = `${root}/src/routes/+page.svelte`;
 
@@ -6767,12 +6841,13 @@ Deno.test("vite extracts font() helper values from imported theme modules", () =
       transformed && typeof transformed === "object" && "code" in transformed,
     );
 
+    const css = load(VIRTUAL_ID) as string;
     assertMatch(
-      transformed.code as string,
+      css,
       /--font-display:"Inter Variable", system-ui, sans-serif/,
     );
     assertMatch(
-      transformed.code as string,
+      css,
       /font-family:var\(--font-display\)/,
     );
   } finally {

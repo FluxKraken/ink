@@ -5316,7 +5316,6 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             PUBLIC_TAILWIND_RUNTIME_ID,
           );
         }
-        nextCode = addSvelteStyleBlock(nextCode, rules);
         const nextImports = Array.from(importRules);
         const prevImports = moduleImports.get(normalizedId) ?? [];
         const importsChanged = nextImports.length !== prevImports.length ||
@@ -5329,7 +5328,15 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           }
           didVirtualCssChange = true;
         }
-        if (moduleCss.delete(normalizedId)) {
+
+        const nextCss = mergeCss(rules);
+        const prevCss = moduleCss.get(normalizedId) ?? "";
+        if (prevCss !== nextCss) {
+          if (nextCss.length > 0) {
+            moduleCss.set(normalizedId, nextCss);
+          } else {
+            moduleCss.delete(normalizedId);
+          }
           didVirtualCssChange = true;
         }
       } else {
