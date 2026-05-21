@@ -7123,3 +7123,135 @@ Deno.test("parser preserves $ prefixed keys", () => {
     "black",
   );
 });
+
+Deno.test("new ink() runtime supports importModule", () => {
+  const styles = new (ink as any)();
+  styles.importModule({ myButton: "_myButton_1a2b3_1" });
+  styles.base = {
+    button: {
+      "@apply": "myButton",
+    },
+  };
+  assertEquals(styles.myButton(), "_myButton_1a2b3_1");
+  assertEquals(styles.button(), "_myButton_1a2b3_1");
+});
+
+Deno.test("new ink({ simple: true }) runtime supports importModule", () => {
+  const styles = new (ink as any)({ simple: true });
+  styles.importModule({ myButton: "_myButton_1a2b3_1" });
+  styles.base = {
+    "@apply": "myButton",
+  };
+  assertEquals(styles.myButton(), "_myButton_1a2b3_1");
+  assertEquals(styles.class(), "_myButton_1a2b3_1");
+});
+
+Deno.test("extracts css from CSS Module imported and resolved at build-time", async () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    
+    const cssModulePath = `${root}/src/button.module.css`;
+    Deno.writeTextFileSync(cssModulePath, `.myButton { background: black; }`);
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const componentCode = `import ink from "@kraken/ink";\n` +
+      `import CSS from "./button.module.css";\n` +
+      `const styles = new ink();\n` +
+      `styles.importModule(CSS);\n` +
+      `styles.base = {\n` +
+      `  button: {\n` +
+      `    "@apply": "myButton",\n` +
+      `  },\n` +
+      `};\n` +
+      `export default styles;\n`;
+
+    const importerPath = `${root}/src/Button.svelte`;
+
+    const context = {
+      load: async (options: { id: string }) => {
+        assertEquals(options.id, cssModulePath);
+        return {
+          code: `export default { myButton: "_myButton_1a2b3_1" };`,
+        };
+      },
+    };
+
+    const transformedResult = await transform.call(context, componentCode, importerPath);
+    assert(
+      transformedResult && typeof transformedResult === "object" && "code" in transformedResult,
+    );
+
+    const transformedCode = transformedResult.code as string;
+    
+    assert(!transformedCode.includes("importModule(CSS)"));
+    assert(transformedCode.includes('"modules":{"myButton":"_myButton_1a2b3_1"}'));
+
+    const css = load(scopedVirtualId(importerPath));
+    assertEquals(css, "");
+    assert(transformedCode.includes('"button":"_myButton_1a2b3_1"'));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("extracts css from CSS Module in simple builder style resolved at build-time", async () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    
+    const cssModulePath = `${root}/src/button.module.css`;
+    Deno.writeTextFileSync(cssModulePath, `.myButton { background: black; }`);
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const componentCode = `import ink from "@kraken/ink";\n` +
+      `import CSS from "./button.module.css";\n` +
+      `const styles = new ink({ simple: true });\n` +
+      `styles.importModule(CSS);\n` +
+      `styles.base = {\n` +
+      `  "@apply": "myButton",\n` +
+      `};\n` +
+      `export default styles;\n`;
+
+    const importerPath = `${root}/src/Button.svelte`;
+
+    const context = {
+      load: async (options: { id: string }) => {
+        assertEquals(options.id, cssModulePath);
+        return {
+          code: `export default { myButton: "_myButton_simple" };`,
+        };
+      },
+    };
+
+    const transformedResult = await transform.call(context, componentCode, importerPath);
+    assert(
+      transformedResult && typeof transformedResult === "object" && "code" in transformedResult,
+    );
+
+    const transformedCode = transformedResult.code as string;
+    
+    assert(!transformedCode.includes("importModule(CSS)"));
+    assert(transformedCode.includes('"modules":{"myButton":"_myButton_simple"}'));
+
+    const css = load(scopedVirtualId(importerPath));
+    assertEquals(css, "");
+    assert(transformedCode.includes('"__ink_simple__":"_myButton_simple"'));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});

@@ -145,6 +145,7 @@ type ViteResolvedConfigLike = {
 
 type ViteTransformContextLike = {
   addWatchFile?: (id: string) => void;
+  load?: (options: { id: string }) => Promise<any>;
 };
 
 type ImportResolverOptions = {
@@ -2193,6 +2194,7 @@ const CT_BUILDER_ASSIGNMENT_PROPERTIES = new Set([
   "defaults",
   "tailwind",
   "tailwindCss",
+  "modules",
 ]);
 
 type AstScopeEntry = AstNewInkDeclaration | null;
@@ -2526,8 +2528,9 @@ function collectAstTransformTargets(
       return;
     }
 
-    if (astIdentifierText(access.name) !== "import") {
-      if (astIdentifierText(access.name) !== "addContainer") {
+    const methodName = astIdentifierText(access.name);
+    if (methodName !== "import" && methodName !== "importModule") {
+      if (methodName !== "addContainer") {
         return;
       }
 
@@ -2552,7 +2555,7 @@ function collectAstTransformTargets(
     const firstArg = call.arguments[0];
     const lastArg = call.arguments[call.arguments.length - 1];
     builder.assignments.push({
-      property: "import",
+      property: methodName,
       start: astNodeStart(statement, sourceFile),
       end: astNodeEnd(statement),
       valueSource: code.slice(
@@ -4301,1095 +4304,1183 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       const constValueCache = new Map<string, unknown | null>();
       const resolving = new Set<string>();
       const staticDependencies = new Set<string>();
+      const cssModuleMappings = new Map<string, Record<string, string>>();
 
-      function lineAt(index: number): number {
-        let line = 1;
-        for (let i = 0; i < index; i += 1) {
-          if (nextCode[i] === "\n") {
-            line += 1;
-          }
-        }
-        return line;
-      }
-
-      function staticResolutionError(message: string, index: number): Error {
-        return new Error(
-          `[ink] ${message} (${normalizedId}:${lineAt(index)})`,
-        );
-      }
-
-      function logStatic(message: string): void {
-        if (!shouldLogStatic) {
-          return;
-        }
-        console.log(`[ink][static] ${normalizedId} ${message}`);
-      }
-
-      function withRuntimeOptionsInNewInkInitializer(
-        optionsSource?: string,
-      ): string {
-        return `new ink(${
-          optionsSource ?? "undefined"
-        }, undefined, ${runtimeOptionsLiteral})`;
-      }
-
-      function readMemberPath(
-        value: unknown,
-        members: readonly string[],
-      ): unknown | null {
-        let current: unknown = value;
-        for (const member of members) {
-          if (
-            typeof current !== "object" || current === null ||
-            Array.isArray(current)
-          ) {
-            return null;
-          }
-          const record = current as Record<string, unknown>;
-          if (!(member in record)) {
-            return null;
-          }
-          current = record[member];
-        }
-        return current;
-      }
-
-      function getModuleCode(moduleId: string): string | null {
-        if (moduleId === normalizedId) {
-          return code;
-        }
-        try {
-          staticDependencies.add(cleanId(moduleId));
-          return getNodeFs().readFileSync(moduleId, "utf8");
-        } catch {
-          return null;
-        }
-      }
-
-      function getModuleInfo(moduleId: string): ModuleStaticInfo | null {
-        const cached = moduleInfoCache.get(moduleId);
-        if (cached) {
-          return cached;
-        }
-        const moduleCode = getModuleCode(moduleId);
-        if (!moduleCode) {
-          return null;
-        }
-        const parsed = parseModuleStaticInfo(moduleCode);
-        moduleInfoCache.set(moduleId, parsed);
-        return parsed;
-      }
-
-      function resolveIdentifierInModule(
-        identifierPath: readonly string[],
-        moduleId: string,
-      ): unknown | null {
-        if (identifierPath.length === 0) {
-          return null;
-        }
-
-        const cacheKey = `${moduleId}::${identifierPath.join(".")}`;
-        if (constValueCache.has(cacheKey)) {
-          return constValueCache.get(cacheKey) ?? null;
-        }
-        if (resolving.has(cacheKey)) {
-          return null;
-        }
-
-        resolving.add(cacheKey);
-        let resolved: unknown | null = null;
-        const [head, ...tail] = identifierPath;
-
-        const moduleInfo = getModuleInfo(moduleId);
-        if (moduleInfo) {
-          const buildEvalScope = (
-            excludeName?: string,
-            sourceHint?: string,
-          ): Record<string, unknown> => {
-            const evalScope: Record<string, unknown> = {
-              ...STATIC_EVAL_GLOBALS,
-            };
-            for (const localName of moduleInfo.functionDeclarations.keys()) {
-              if (
-                localName === excludeName ||
-                !identifierMentioned(sourceHint, localName)
-              ) {
-                continue;
-              }
-              const localValue = resolveIdentifierInModule(
-                [localName],
-                moduleId,
-              );
-              if (localValue !== null) {
-                evalScope[localName] = localValue;
-              }
-            }
-            for (const localName of moduleInfo.constInitializers.keys()) {
-              if (
-                localName === excludeName ||
-                !identifierMentioned(sourceHint, localName)
-              ) {
-                continue;
-              }
-              const localValue = resolveIdentifierInModule(
-                [localName],
-                moduleId,
-              );
-              if (localValue !== null) {
-                evalScope[localName] = localValue;
-              }
-            }
-            for (const localName of moduleInfo.imports.keys()) {
-              if (!identifierMentioned(sourceHint, localName)) {
-                continue;
-              }
-              const localValue = resolveIdentifierInModule(
-                [localName],
-                moduleId,
-              );
-              if (localValue !== null) {
-                evalScope[localName] = localValue;
-              }
-            }
-            return evalScope;
-          };
-
-          const initializerInfo = moduleInfo.constInitializers.get(head);
-          if (initializerInfo !== undefined) {
-            const initializer = initializerInfo.initializer;
-            let value = parseStaticExpression(initializer, (nestedPath) => {
-              const nested = resolveIdentifierInModule(nestedPath, moduleId);
-              return nested === null ? undefined : nested;
-            }, { keepUnresolvedIdentifiers: true });
-
-            if (value === null) {
-              value = evaluateExpression(
-                initializer,
-                buildEvalScope(head, initializer),
-              );
-            }
-
-            if (value !== null) {
-              resolved = tail.length > 0 ? readMemberPath(value, tail) : value;
-            }
-          } else {
-            const functionDeclaration = moduleInfo.functionDeclarations.get(
-              head,
-            );
-            if (functionDeclaration !== undefined) {
-              const functionValue = evaluateFunctionDeclaration(
-                functionDeclaration,
-                buildEvalScope(head, functionDeclaration),
-              );
-              if (functionValue !== null) {
-                resolved = tail.length > 0
-                  ? readMemberPath(functionValue, tail)
-                  : functionValue;
-              }
+      const runSync = () => {
+        function lineAt(index: number): number {
+          let line = 1;
+          for (let i = 0; i < index; i += 1) {
+            if (nextCode[i] === "\n") {
+              line += 1;
             }
           }
-
-          if (resolved === null) {
-            const binding = moduleInfo.imports.get(head);
-            if (binding) {
-              resolved = resolveStaticInkImport(binding, tail);
-              if (resolved === null) {
-                const resolvedImportFile = resolveImportToFile(
-                  moduleId,
-                  binding.source,
-                  {
-                    projectRoot,
-                    viteRoot,
-                    viteAliases,
-                    tsconfigResolver,
-                  },
-                );
-                resolved = resolveStaticImageImport(
-                  binding,
-                  tail,
-                  moduleId,
-                  resolvedImportFile,
-                  {
-                    projectRoot,
-                    viteRoot,
-                    viteAliases,
-                    tsconfigResolver,
-                  },
-                );
-                if (resolved === null && resolvedImportFile) {
-                  const importedModuleInfo = getModuleInfo(resolvedImportFile);
-                  if (importedModuleInfo) {
-                    if (binding.kind === "namespace") {
-                      if (tail.length > 0) {
-                        const [namespaceExport, ...namespaceTail] = tail;
-                        const exportedLocalName =
-                          importedModuleInfo.exportedConsts.get(
-                            namespaceExport,
-                          ) ?? namespaceExport;
-                        const namespaceValue = resolveIdentifierInModule(
-                          [exportedLocalName],
-                          resolvedImportFile,
-                        );
-                        resolved = namespaceTail.length > 0
-                          ? readMemberPath(namespaceValue, namespaceTail)
-                          : namespaceValue;
-                      }
-                    } else {
-                      const importedName = binding.kind === "default"
-                        ? "default"
-                        : binding.imported;
-                      const exportedLocalName = importedName === "default"
-                        ? null
-                        : (importedModuleInfo.exportedConsts.get(
-                          importedName,
-                        ) ??
-                          importedName);
-                      const importedValue = resolveIdentifierInModule(
-                        exportedLocalName ? [exportedLocalName] : ["default"],
-                        resolvedImportFile,
-                      );
-                      resolved = tail.length > 0
-                        ? readMemberPath(importedValue, tail)
-                        : importedValue;
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          if (
-            resolved === null && head === "default" &&
-            moduleInfo.defaultExportExpression
-          ) {
-            const parsedDefault = parseStaticExpression(
-              moduleInfo.defaultExportExpression,
-              (nestedPath) =>
-                resolveIdentifierInModule(nestedPath, moduleId) ?? undefined,
-            );
-            if (parsedDefault !== null) {
-              resolved = tail.length > 0
-                ? readMemberPath(parsedDefault, tail)
-                : parsedDefault;
-            } else {
-              const evaluatedDefault = evaluateExpression(
-                moduleInfo.defaultExportExpression,
-                buildEvalScope(undefined, moduleInfo.defaultExportExpression),
-              );
-              if (evaluatedDefault !== null) {
-                resolved = tail.length > 0
-                  ? readMemberPath(evaluatedDefault, tail)
-                  : evaluatedDefault;
-              }
-            }
-          }
+          return line;
         }
 
-        resolving.delete(cacheKey);
-        if (resolved !== null) {
-          constValueCache.set(cacheKey, resolved);
-        } else {
-          constValueCache.delete(cacheKey);
-        }
-        return resolved;
-      }
-
-      for (const call of calls) {
-        if (resolution === "dynamic") {
-          replacements.push({
-            start: call.start,
-            end: call.end,
-            text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
-          });
-          continue;
-        }
-
-        const parsed = parseInkCallArgumentsWithResolver(
-          call.arg,
-          (identifierPath) =>
-            resolveIdentifierInModule(identifierPath, normalizedId) ??
-              undefined,
-          {
-            utilities: inkConfig.utilities,
-            containers: inkConfig.containers,
-            themeMode: inkConfig.themeMode,
-          },
-        ) ??
-          parseInkCallArguments(call.arg, {
-            utilities: inkConfig.utilities,
-            containers: inkConfig.containers,
-            themeMode: inkConfig.themeMode,
-          });
-        if (!parsed) {
-          if (resolution === "static") {
-            throw staticResolutionError(
-              'resolution="static" could not statically resolve ink(...)',
-              call.start,
-            );
-          }
-          replacements.push({
-            start: call.start,
-            end: call.end,
-            text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
-          });
-          continue;
-        }
-
-        for (const importPath of parsed.imports ?? []) {
-          const browserPath = toBrowserStylesheetPath(
-            importPath,
-            normalizedId,
-            {
-              projectRoot,
-              viteRoot,
-              viteAliases,
-              tsconfigResolver,
-            },
+        function staticResolutionError(message: string, index: number): Error {
+          return new Error(
+            `[ink] ${message} (${normalizedId}:${lineAt(index)})`,
           );
-          if (browserPath) {
-            importRules.add(browserPath);
-            logStatic(`import -> ${browserPath}`);
-          }
         }
 
-        const classMap: Record<string, string> = {};
-        const variantClassMap: Record<
-          string,
-          Record<string, Partial<Record<string, string>>>
-        > = {};
-        const variantGlobalRuleMap: Record<string, Record<string, string[]>> =
-          {};
-        const compiledConfig: Record<string, unknown> = {};
-        if ((parsed.imports?.length ?? 0) > 0) {
-          compiledConfig.imports = true;
+        function logStatic(message: string): void {
+          if (!shouldLogStatic) {
+            return;
+          }
+          console.log(`[ink][static] ${normalizedId} ${message}`);
         }
 
-        if ((parsed.tailwindCss?.length ?? 0) > 0) {
-          for (const cssBlock of parsed.tailwindCss ?? []) {
-            rules.add(cssBlock);
-          }
-          compiledConfig.global = true;
-          logStatic(`tailwind css blocks: ${parsed.tailwindCss!.length}`);
+        function withRuntimeOptionsInNewInkInitializer(
+          optionsSource?: string,
+        ): string {
+          return `new ink(${
+            optionsSource ?? "undefined"
+          }, undefined, ${runtimeOptionsLiteral})`;
         }
 
-        const extractedGlobalRules = {
-          ...rootVarsToGlobalRules(parsed.root ?? parsed.rootVars),
-          ...(parsed.global ?? {}),
-        };
-        if (Object.keys(extractedGlobalRules).length > 0) {
-          for (
-            const rule of toCssGlobalRules(extractedGlobalRules, {
-              breakpoints: inkConfig.breakpoints,
-              containers: inkConfig.containers,
-              defaultUnit: inkConfig.defaultUnit,
-            })
-          ) {
-            rules.add(rule);
-          }
-          compiledConfig.global = true;
-          for (const selector of Object.keys(extractedGlobalRules)) {
-            logStatic(`global.${selector}`);
-          }
-        }
-
-        for (const [key, style] of Object.entries(parsed.base)) {
-          const generatedClassName = hasStyleDeclarations(style.declaration) ||
-              !hasTailwindClassNames(style)
-            ? createClassName(key, style.declaration, normalizedId)
-            : undefined;
-          const classValue = resolveStyleClassValue(generatedClassName, style);
-          classMap[key] = classValue;
-          if (!generatedClassName) {
-            continue;
-          }
-          for (
-            const rule of toCssRules(generatedClassName, style.declaration, {
-              breakpoints: inkConfig.breakpoints,
-              containers: inkConfig.containers,
-              defaultUnit: inkConfig.defaultUnit,
-            })
-          ) {
-            rules.add(rule);
-          }
-        }
-        compiledConfig.base = classMap;
-        for (const [key, className] of Object.entries(classMap)) {
-          logStatic(`base.${key} -> ${className}`);
-        }
-
-        if (parsed.variant) {
-          for (const [group, variants] of Object.entries(parsed.variant)) {
-            const groupMap: Record<string, Partial<Record<string, string>>> =
-              {};
-            for (
-              const [variantName, declarations] of Object.entries(variants)
+        function readMemberPath(
+          value: unknown,
+          members: readonly string[],
+        ): unknown | null {
+          let current: unknown = value;
+          for (const member of members) {
+            if (
+              typeof current !== "object" || current === null ||
+              Array.isArray(current)
             ) {
-              const variantMap: Partial<Record<string, string>> = {};
-              for (const [key, style] of Object.entries(declarations)) {
-                const generatedClassName =
-                  hasStyleDeclarations(style.declaration) ||
-                    !hasTailwindClassNames(style)
-                    ? createClassName(
-                      `${group}:${variantName}:${key}`,
-                      style.declaration,
-                      normalizedId,
-                    )
-                    : undefined;
-                const classValue = resolveStyleClassValue(
-                  generatedClassName,
-                  style,
-                );
-                variantMap[key] = classValue;
-                if (generatedClassName) {
-                  for (
-                    const rule of toCssRules(
-                      generatedClassName,
-                      style.declaration,
-                      {
-                        breakpoints: inkConfig.breakpoints,
-                        containers: inkConfig.containers,
-                        defaultUnit: inkConfig.defaultUnit,
-                      },
-                    )
-                  ) {
-                    rules.add(rule);
-                  }
-                }
-                logStatic(
-                  `variant.${group}.${variantName}.${key} -> ${classValue}`,
-                );
-              }
-              groupMap[variantName] = variantMap;
+              return null;
             }
-            variantClassMap[group] = groupMap;
-          }
-          compiledConfig.variant = variantClassMap;
-        }
-
-        if (parsed.variantGlobal) {
-          for (
-            const [group, variants] of Object.entries(parsed.variantGlobal)
-          ) {
-            const groupMap: Record<string, string[]> = {};
-            for (
-              const [variantName, declarations] of Object.entries(variants)
-            ) {
-              const variantRules = toCssGlobalRules(declarations, {
-                breakpoints: inkConfig.breakpoints,
-                containers: inkConfig.containers,
-                defaultUnit: inkConfig.defaultUnit,
-              });
-              groupMap[variantName] = variantRules;
-              logStatic(`variantGlobal.${group}.${variantName}`);
+            const record = current as Record<string, unknown>;
+            if (!(member in record)) {
+              return null;
             }
-            variantGlobalRuleMap[group] = groupMap;
+            current = record[member];
           }
-          compiledConfig.variantGlobal = variantGlobalRuleMap;
+          return current;
         }
 
-        const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-        const replacement = `ink(${runtimeConfigLiteral}, ${
-          JSON.stringify(compiledConfig)
-        }, ${runtimeOptionsLiteral})`;
-        replacements.push({
-          start: call.start,
-          end: call.end,
-          text: replacement,
-        });
-      }
-
-      for (const decl of newInkDecls) {
-        const resolvedBuilderOptionsValue = decl.optionsSource
-          ? parseStaticExpression(
-            decl.optionsSource,
-            (identifierPath) =>
-              resolveIdentifierInModule(identifierPath, normalizedId) ??
-                undefined,
-          ) ?? parseStaticExpression(decl.optionsSource)
-          : undefined;
-        const hasStaticBuilderOptions = decl.optionsSource === undefined ||
-          resolvedBuilderOptionsValue !== null;
-        const resolvedBuilderOptions = parseInkBuilderOptions(
-          resolvedBuilderOptionsValue,
-        ) ?? { simple: decl.simple };
-        const runtimeDeclaration = withRuntimeOptionsInNewInkInitializer(
-          decl.optionsSource,
-        );
-
-        if (resolution === "dynamic") {
-          replacements.push({
-            start: decl.initializerStart,
-            end: decl.initializerEnd,
-            text: runtimeDeclaration,
-          });
-          continue;
-        }
-
-        if (decl.hasAddContainerCall) {
-          if (resolution === "static") {
-            throw staticResolutionError(
-              `resolution="static" cannot statically resolve ${decl.varName}.addContainer(...)`,
-              decl.start,
-            );
+        function getModuleCode(moduleId: string): string | null {
+          if (moduleId === normalizedId) {
+            return code;
           }
-          replacements.push({
-            start: decl.initializerStart,
-            end: decl.initializerEnd,
-            text: runtimeDeclaration,
-          });
-          continue;
-        }
-
-        if (!hasStaticBuilderOptions) {
-          if (resolution === "static") {
-            throw staticResolutionError(
-              `resolution="static" could not statically resolve options for ${decl.varName}`,
-              decl.start,
-            );
+          try {
+            staticDependencies.add(cleanId(moduleId));
+            return getNodeFs().readFileSync(moduleId, "utf8");
+          } catch {
+            return null;
           }
-          replacements.push({
-            start: decl.initializerStart,
-            end: decl.initializerEnd,
-            text: runtimeDeclaration,
-          });
-          continue;
         }
 
-        const configParts: Record<string, unknown> =
-          resolvedBuilderOptions.simple ? { simple: true } : {};
-        const importParts: unknown[] = [];
-        let allParsed = true;
+        function getModuleInfo(moduleId: string): ModuleStaticInfo | null {
+          const cached = moduleInfoCache.get(moduleId);
+          if (cached) {
+            return cached;
+          }
+          const moduleCode = getModuleCode(moduleId);
+          if (!moduleCode) {
+            return null;
+          }
+          const parsed = parseModuleStaticInfo(moduleCode);
+          moduleInfoCache.set(moduleId, parsed);
+          return parsed;
+        }
 
-        for (const assignment of decl.assignments) {
-          let value = parseStaticExpression(assignment.valueSource) ??
-            parseStaticExpression(
-              assignment.valueSource,
-              (identifierPath) =>
-                resolveIdentifierInModule(identifierPath, normalizedId) ??
-                  undefined,
-            );
-          if (value === null) {
-            const moduleInfo = getModuleInfo(normalizedId);
-            if (moduleInfo) {
+        function resolveIdentifierInModule(
+          identifierPath: readonly string[],
+          moduleId: string,
+        ): unknown | null {
+          if (identifierPath.length === 0) {
+            return null;
+          }
+
+          if (moduleId === normalizedId && identifierPath.length > 0) {
+            const head = identifierPath[0];
+            if (cssModuleMappings.has(head)) {
+              const mapping = cssModuleMappings.get(head)!;
+              return identifierPath.length > 1
+                ? readMemberPath(mapping, identifierPath.slice(1))
+                : mapping;
+            }
+          }
+
+          const cacheKey = `${moduleId}::${identifierPath.join(".")}`;
+          if (constValueCache.has(cacheKey)) {
+            return constValueCache.get(cacheKey) ?? null;
+          }
+          if (resolving.has(cacheKey)) {
+            return null;
+          }
+
+          resolving.add(cacheKey);
+          let resolved: unknown | null = null;
+          const [head, ...tail] = identifierPath;
+
+          const moduleInfo = getModuleInfo(moduleId);
+          if (moduleInfo) {
+            const buildEvalScope = (
+              excludeName?: string,
+              sourceHint?: string,
+            ): Record<string, unknown> => {
               const evalScope: Record<string, unknown> = {
                 ...STATIC_EVAL_GLOBALS,
               };
               for (const localName of moduleInfo.functionDeclarations.keys()) {
-                if (!identifierMentioned(assignment.valueSource, localName)) {
+                if (
+                  localName === excludeName ||
+                  !identifierMentioned(sourceHint, localName)
+                ) {
                   continue;
                 }
                 const localValue = resolveIdentifierInModule(
                   [localName],
-                  normalizedId,
+                  moduleId,
                 );
                 if (localValue !== null) {
                   evalScope[localName] = localValue;
                 }
               }
               for (const localName of moduleInfo.constInitializers.keys()) {
-                if (!identifierMentioned(assignment.valueSource, localName)) {
+                if (
+                  localName === excludeName ||
+                  !identifierMentioned(sourceHint, localName)
+                ) {
                   continue;
                 }
                 const localValue = resolveIdentifierInModule(
                   [localName],
-                  normalizedId,
+                  moduleId,
                 );
                 if (localValue !== null) {
                   evalScope[localName] = localValue;
                 }
               }
               for (const localName of moduleInfo.imports.keys()) {
-                if (!identifierMentioned(assignment.valueSource, localName)) {
+                if (!identifierMentioned(sourceHint, localName)) {
                   continue;
                 }
                 const localValue = resolveIdentifierInModule(
                   [localName],
-                  normalizedId,
+                  moduleId,
                 );
                 if (localValue !== null) {
                   evalScope[localName] = localValue;
                 }
               }
-              value = evaluateExpression(assignment.valueSource, evalScope);
+              return evalScope;
+            };
+
+            const initializerInfo = moduleInfo.constInitializers.get(head);
+            if (initializerInfo !== undefined) {
+              const initializer = initializerInfo.initializer;
+              let value = parseStaticExpression(initializer, (nestedPath) => {
+                const nested = resolveIdentifierInModule(nestedPath, moduleId);
+                return nested === null ? undefined : nested;
+              }, { keepUnresolvedIdentifiers: true });
+
+              if (value === null) {
+                value = evaluateExpression(
+                  initializer,
+                  buildEvalScope(head, initializer),
+                );
+              }
+
+              if (value !== null) {
+                resolved = tail.length > 0 ? readMemberPath(value, tail) : value;
+              }
+            } else {
+              const functionDeclaration = moduleInfo.functionDeclarations.get(
+                head,
+              );
+              if (functionDeclaration !== undefined) {
+                const functionValue = evaluateFunctionDeclaration(
+                  functionDeclaration,
+                  buildEvalScope(head, functionDeclaration),
+                );
+                if (functionValue !== null) {
+                  resolved = tail.length > 0
+                    ? readMemberPath(functionValue, tail)
+                    : functionValue;
+                }
+              }
+            }
+
+            if (resolved === null) {
+              const binding = moduleInfo.imports.get(head);
+              if (binding) {
+                resolved = resolveStaticInkImport(binding, tail);
+                if (resolved === null) {
+                  const resolvedImportFile = resolveImportToFile(
+                    moduleId,
+                    binding.source,
+                    {
+                      projectRoot,
+                      viteRoot,
+                      viteAliases,
+                      tsconfigResolver,
+                    },
+                  );
+                  resolved = resolveStaticImageImport(
+                    binding,
+                    tail,
+                    moduleId,
+                    resolvedImportFile,
+                    {
+                      projectRoot,
+                      viteRoot,
+                      viteAliases,
+                      tsconfigResolver,
+                    },
+                  );
+                  if (resolved === null && resolvedImportFile) {
+                    const importedModuleInfo = getModuleInfo(resolvedImportFile);
+                    if (importedModuleInfo) {
+                      if (binding.kind === "namespace") {
+                        if (tail.length > 0) {
+                          const [namespaceExport, ...namespaceTail] = tail;
+                          const exportedLocalName =
+                            importedModuleInfo.exportedConsts.get(
+                              namespaceExport,
+                            ) ?? namespaceExport;
+                          const namespaceValue = resolveIdentifierInModule(
+                            [exportedLocalName],
+                            resolvedImportFile,
+                          );
+                          resolved = namespaceTail.length > 0
+                            ? readMemberPath(namespaceValue, namespaceTail)
+                            : namespaceValue;
+                        }
+                      } else {
+                        const importedName = binding.kind === "default"
+                          ? "default"
+                          : binding.imported;
+                        const exportedLocalName = importedName === "default"
+                          ? null
+                          : (importedModuleInfo.exportedConsts.get(
+                            importedName,
+                          ) ??
+                            importedName);
+                        const importedValue = resolveIdentifierInModule(
+                          exportedLocalName ? [exportedLocalName] : ["default"],
+                          resolvedImportFile,
+                        );
+                        resolved = tail.length > 0
+                          ? readMemberPath(importedValue, tail)
+                          : importedValue;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            if (
+              resolved === null && head === "default" &&
+              moduleInfo.defaultExportExpression
+            ) {
+              const parsedDefault = parseStaticExpression(
+                moduleInfo.defaultExportExpression,
+                (nestedPath) =>
+                  resolveIdentifierInModule(nestedPath, moduleId) ?? undefined,
+              );
+              if (parsedDefault !== null) {
+                resolved = tail.length > 0
+                  ? readMemberPath(parsedDefault, tail)
+                  : parsedDefault;
+              } else {
+                const evaluatedDefault = evaluateExpression(
+                  moduleInfo.defaultExportExpression,
+                  buildEvalScope(undefined, moduleInfo.defaultExportExpression),
+                );
+                if (evaluatedDefault !== null) {
+                  resolved = tail.length > 0
+                    ? readMemberPath(evaluatedDefault, tail)
+                    : evaluatedDefault;
+                }
+              }
             }
           }
-          if (value === null) {
-            if (
-              assignment.property === "base" ||
-              assignment.property === "global" ||
-              assignment.property === "themes" ||
-              assignment.property === "fonts" ||
-              assignment.property === "root" ||
-              assignment.property === "rootVars" ||
-              assignment.property === "variant" ||
-              assignment.property === "defaults" ||
-              assignment.property === "tailwind" ||
-              assignment.property === "tailwindCss"
+
+          resolving.delete(cacheKey);
+          if (resolved !== null) {
+            constValueCache.set(cacheKey, resolved);
+          } else {
+            constValueCache.delete(cacheKey);
+          }
+          return resolved;
+        }
+
+        for (const call of calls) {
+          if (resolution === "dynamic") {
+            replacements.push({
+              start: call.start,
+              end: call.end,
+              text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
+            });
+            continue;
+          }
+
+          const parsed = parseInkCallArgumentsWithResolver(
+            call.arg,
+            (identifierPath) =>
+              resolveIdentifierInModule(identifierPath, normalizedId) ??
+                undefined,
+            {
+              utilities: inkConfig.utilities,
+              containers: inkConfig.containers,
+              themeMode: inkConfig.themeMode,
+            },
+          ) ??
+            parseInkCallArguments(call.arg, {
+              utilities: inkConfig.utilities,
+              containers: inkConfig.containers,
+              themeMode: inkConfig.themeMode,
+            });
+          if (!parsed) {
+            if (resolution === "static") {
+              throw staticResolutionError(
+                'resolution="static" could not statically resolve ink(...)',
+                call.start,
+              );
+            }
+            replacements.push({
+              start: call.start,
+              end: call.end,
+              text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
+            });
+            continue;
+          }
+
+          for (const importPath of parsed.imports ?? []) {
+            const browserPath = toBrowserStylesheetPath(
+              importPath,
+              normalizedId,
+              {
+                projectRoot,
+                viteRoot,
+                viteAliases,
+                tsconfigResolver,
+              },
+            );
+            if (browserPath) {
+              importRules.add(browserPath);
+              logStatic(`import -> ${browserPath}`);
+            }
+          }
+
+          const classMap: Record<string, string> = {};
+          const variantClassMap: Record<
+            string,
+            Record<string, Partial<Record<string, string>>>
+          > = {};
+          const variantGlobalRuleMap: Record<string, Record<string, string[]>> =
+            {};
+          const compiledConfig: Record<string, unknown> = {};
+          if ((parsed.imports?.length ?? 0) > 0) {
+            compiledConfig.imports = true;
+          }
+
+          if ((parsed.tailwindCss?.length ?? 0) > 0) {
+            for (const cssBlock of parsed.tailwindCss ?? []) {
+              rules.add(cssBlock);
+            }
+            compiledConfig.global = true;
+            logStatic(`tailwind css blocks: ${parsed.tailwindCss!.length}`);
+          }
+
+          const extractedGlobalRules = {
+            ...rootVarsToGlobalRules(parsed.root ?? parsed.rootVars),
+            ...(parsed.global ?? {}),
+          };
+          if (Object.keys(extractedGlobalRules).length > 0) {
+            for (
+              const rule of toCssGlobalRules(extractedGlobalRules, {
+                breakpoints: inkConfig.breakpoints,
+                containers: inkConfig.containers,
+                defaultUnit: inkConfig.defaultUnit,
+              })
             ) {
-              const partialParsed = parseInkCallArgumentsWithResolver(
-                `{ ${
-                  resolvedBuilderOptions.simple ? "simple: true, " : ""
-                }${assignment.property}: ${assignment.valueSource} }`,
+              rules.add(rule);
+            }
+            compiledConfig.global = true;
+            for (const selector of Object.keys(extractedGlobalRules)) {
+              logStatic(`global.${selector}`);
+            }
+          }
+
+          for (const [key, style] of Object.entries(parsed.base)) {
+            const generatedClassName = hasStyleDeclarations(style.declaration) ||
+                !hasTailwindClassNames(style)
+              ? createClassName(key, style.declaration, normalizedId)
+              : undefined;
+            const classValue = resolveStyleClassValue(generatedClassName, style);
+            classMap[key] = classValue;
+            if (!generatedClassName) {
+              continue;
+            }
+            for (
+              const rule of toCssRules(generatedClassName, style.declaration, {
+                breakpoints: inkConfig.breakpoints,
+                containers: inkConfig.containers,
+                defaultUnit: inkConfig.defaultUnit,
+              })
+            ) {
+              rules.add(rule);
+            }
+          }
+          compiledConfig.base = classMap;
+          for (const [key, className] of Object.entries(classMap)) {
+            logStatic(`base.${key} -> ${className}`);
+          }
+
+          if (parsed.variant) {
+            for (const [group, variants] of Object.entries(parsed.variant)) {
+              const groupMap: Record<string, Partial<Record<string, string>>> =
+                {};
+              for (
+                const [variantName, declarations] of Object.entries(variants)
+              ) {
+                const variantMap: Partial<Record<string, string>> = {};
+                for (const [key, style] of Object.entries(declarations)) {
+                  const generatedClassName =
+                    hasStyleDeclarations(style.declaration) ||
+                      !hasTailwindClassNames(style)
+                      ? createClassName(
+                        `${group}:${variantName}:${key}`,
+                        style.declaration,
+                        normalizedId,
+                      )
+                      : undefined;
+                  const classValue = resolveStyleClassValue(
+                    generatedClassName,
+                    style,
+                  );
+                  variantMap[key] = classValue;
+                  if (generatedClassName) {
+                    for (
+                      const rule of toCssRules(
+                        generatedClassName,
+                        style.declaration,
+                        {
+                          breakpoints: inkConfig.breakpoints,
+                          containers: inkConfig.containers,
+                          defaultUnit: inkConfig.defaultUnit,
+                        },
+                      )
+                    ) {
+                      rules.add(rule);
+                    }
+                  }
+                  logStatic(
+                    `variant.${group}.${variantName}.${key} -> ${classValue}`,
+                  );
+                }
+                groupMap[variantName] = variantMap;
+              }
+              variantClassMap[group] = groupMap;
+            }
+            compiledConfig.variant = variantClassMap;
+          }
+
+          if (parsed.variantGlobal) {
+            for (
+              const [group, variants] of Object.entries(parsed.variantGlobal)
+            ) {
+              const groupMap: Record<string, string[]> = {};
+              for (
+                const [variantName, declarations] of Object.entries(variants)
+              ) {
+                const variantRules = toCssGlobalRules(declarations, {
+                  breakpoints: inkConfig.breakpoints,
+                  containers: inkConfig.containers,
+                  defaultUnit: inkConfig.defaultUnit,
+                });
+                groupMap[variantName] = variantRules;
+                logStatic(`variantGlobal.${group}.${variantName}`);
+              }
+              variantGlobalRuleMap[group] = groupMap;
+            }
+            compiledConfig.variantGlobal = variantGlobalRuleMap;
+          }
+
+          const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
+          const replacement = `ink(${runtimeConfigLiteral}, ${
+            JSON.stringify(compiledConfig)
+          }, ${runtimeOptionsLiteral})`;
+          replacements.push({
+            start: call.start,
+            end: call.end,
+            text: replacement,
+          });
+        }
+
+        for (const decl of newInkDecls) {
+          const resolvedBuilderOptionsValue = decl.optionsSource
+            ? parseStaticExpression(
+              decl.optionsSource,
+              (identifierPath) =>
+                resolveIdentifierInModule(identifierPath, normalizedId) ??
+                  undefined,
+            ) ?? parseStaticExpression(decl.optionsSource)
+            : undefined;
+          const hasStaticBuilderOptions = decl.optionsSource === undefined ||
+            resolvedBuilderOptionsValue !== null;
+          const resolvedBuilderOptions = parseInkBuilderOptions(
+            resolvedBuilderOptionsValue,
+          ) ?? { simple: decl.simple };
+          const runtimeDeclaration = withRuntimeOptionsInNewInkInitializer(
+            decl.optionsSource,
+          );
+
+          if (resolution === "dynamic") {
+            replacements.push({
+              start: decl.initializerStart,
+              end: decl.initializerEnd,
+              text: runtimeDeclaration,
+            });
+            continue;
+          }
+
+          if (decl.hasAddContainerCall) {
+            if (resolution === "static") {
+              throw staticResolutionError(
+                `resolution="static" cannot statically resolve ${decl.varName}.addContainer(...)`,
+                decl.start,
+              );
+            }
+            replacements.push({
+              start: decl.initializerStart,
+              end: decl.initializerEnd,
+              text: runtimeDeclaration,
+            });
+            continue;
+          }
+
+          if (!hasStaticBuilderOptions) {
+            if (resolution === "static") {
+              throw staticResolutionError(
+                `resolution="static" could not statically resolve options for ${decl.varName}`,
+                decl.start,
+              );
+            }
+            replacements.push({
+              start: decl.initializerStart,
+              end: decl.initializerEnd,
+              text: runtimeDeclaration,
+            });
+            continue;
+          }
+
+          const configParts: Record<string, unknown> =
+            resolvedBuilderOptions.simple ? { simple: true } : {};
+          const importParts: unknown[] = [];
+          let allParsed = true;
+
+          for (const assignment of decl.assignments) {
+            let value = parseStaticExpression(assignment.valueSource) ??
+              parseStaticExpression(
+                assignment.valueSource,
                 (identifierPath) =>
                   resolveIdentifierInModule(identifierPath, normalizedId) ??
                     undefined,
-                {
-                  utilities: inkConfig.utilities,
-                  containers: inkConfig.containers,
-                  themeMode: inkConfig.themeMode,
-                },
-              ) ?? parseInkCallArguments(
-                `{ ${
-                  resolvedBuilderOptions.simple ? "simple: true, " : ""
-                }${assignment.property}: ${assignment.valueSource} }`,
-                {
-                  utilities: inkConfig.utilities,
-                  containers: inkConfig.containers,
-                  themeMode: inkConfig.themeMode,
-                },
               );
+            if (value === null) {
+              const moduleInfo = getModuleInfo(normalizedId);
+              if (moduleInfo) {
+                const evalScope: Record<string, unknown> = {
+                  ...STATIC_EVAL_GLOBALS,
+                };
+                for (const localName of moduleInfo.functionDeclarations.keys()) {
+                  if (!identifierMentioned(assignment.valueSource, localName)) {
+                    continue;
+                  }
+                  const localValue = resolveIdentifierInModule(
+                    [localName],
+                    normalizedId,
+                  );
+                  if (localValue !== null) {
+                    evalScope[localName] = localValue;
+                  }
+                }
+                for (const localName of moduleInfo.constInitializers.keys()) {
+                  if (!identifierMentioned(assignment.valueSource, localName)) {
+                    continue;
+                  }
+                  const localValue = resolveIdentifierInModule(
+                    [localName],
+                    normalizedId,
+                  );
+                  if (localValue !== null) {
+                    evalScope[localName] = localValue;
+                  }
+                }
+                for (const localName of moduleInfo.imports.keys()) {
+                  if (!identifierMentioned(assignment.valueSource, localName)) {
+                    continue;
+                  }
+                  const localValue = resolveIdentifierInModule(
+                    [localName],
+                    normalizedId,
+                  );
+                  if (localValue !== null) {
+                    evalScope[localName] = localValue;
+                  }
+                }
+                value = evaluateExpression(assignment.valueSource, evalScope);
+              }
+            }
+            if (value === null) {
+              if (
+                assignment.property === "base" ||
+                assignment.property === "global" ||
+                assignment.property === "themes" ||
+                assignment.property === "fonts" ||
+                assignment.property === "root" ||
+                assignment.property === "rootVars" ||
+                assignment.property === "variant" ||
+                assignment.property === "defaults" ||
+                assignment.property === "tailwind" ||
+                assignment.property === "tailwindCss"
+              ) {
+                const partialParsed = parseInkCallArgumentsWithResolver(
+                  `{ ${
+                    resolvedBuilderOptions.simple ? "simple: true, " : ""
+                  }${assignment.property}: ${assignment.valueSource} }`,
+                  (identifierPath) =>
+                    resolveIdentifierInModule(identifierPath, normalizedId) ??
+                      undefined,
+                  {
+                    utilities: inkConfig.utilities,
+                    containers: inkConfig.containers,
+                    themeMode: inkConfig.themeMode,
+                  },
+                ) ?? parseInkCallArguments(
+                  `{ ${
+                    resolvedBuilderOptions.simple ? "simple: true, " : ""
+                  }${assignment.property}: ${assignment.valueSource} }`,
+                  {
+                    utilities: inkConfig.utilities,
+                    containers: inkConfig.containers,
+                    themeMode: inkConfig.themeMode,
+                  },
+                );
 
-              if (partialParsed) {
-                const parsedRoot = partialParsed.root ?? partialParsed.rootVars;
-                if (assignment.property === "base") {
-                  configParts.base = partialParsed.base;
-                } else if (assignment.property === "global") {
-                  configParts.global = partialParsed.global ?? {};
-                } else if (
-                  assignment.property === "themes" &&
-                  Object.keys(partialParsed.global ?? {}).length > 0
-                ) {
-                  configParts.global = {
-                    ...(configParts.global as Record<string, unknown> ?? {}),
-                    ...(partialParsed.global as Record<string, unknown>),
-                  };
-                  if (parsedRoot) {
+                if (partialParsed) {
+                  const parsedRoot = partialParsed.root ?? partialParsed.rootVars;
+                  if (assignment.property === "base") {
+                    configParts.base = partialParsed.base;
+                  } else if (assignment.property === "global") {
+                    configParts.global = partialParsed.global ?? {};
+                  } else if (
+                    assignment.property === "themes" &&
+                    Object.keys(partialParsed.global ?? {}).length > 0
+                  ) {
+                    configParts.global = {
+                      ...(configParts.global as Record<string, unknown> ?? {}),
+                      ...(partialParsed.global as Record<string, unknown>),
+                    };
+                    if (parsedRoot) {
+                      configParts.root = [
+                        ...((configParts.root as unknown[]) ?? []),
+                        ...parsedRoot,
+                      ];
+                    }
+                  } else if (
+                    (assignment.property === "root" ||
+                      assignment.property === "rootVars") &&
+                    parsedRoot
+                  ) {
+                    configParts.root = parsedRoot;
+                  } else if (
+                    (assignment.property === "themes" ||
+                      assignment.property === "fonts") &&
+                    parsedRoot
+                  ) {
                     configParts.root = [
                       ...((configParts.root as unknown[]) ?? []),
                       ...parsedRoot,
                     ];
-                  }
-                } else if (
-                  (assignment.property === "root" ||
-                    assignment.property === "rootVars") &&
-                  parsedRoot
-                ) {
-                  configParts.root = parsedRoot;
-                } else if (
-                  (assignment.property === "themes" ||
-                    assignment.property === "fonts") &&
-                  parsedRoot
-                ) {
-                  configParts.root = [
-                    ...((configParts.root as unknown[]) ?? []),
-                    ...parsedRoot,
-                  ];
-                } else if (
-                  assignment.property === "variant" && partialParsed.variant
-                ) {
-                  configParts.variant = partialParsed.variant;
-                } else if (
-                  assignment.property === "defaults" && partialParsed.defaults
-                ) {
-                  configParts.defaults = partialParsed.defaults;
-                } else if (
-                  assignment.property === "tailwindCss" &&
-                  partialParsed.tailwindCss
-                ) {
-                  configParts.tailwindCss = partialParsed.tailwindCss;
-                } else if (assignment.property === "tailwind") {
-                  configParts.tailwind = partialParsed.tailwind;
-                }
-                if ((partialParsed.imports?.length ?? 0) > 0) {
-                  importParts.push(partialParsed.imports!);
-                }
-                continue;
-              }
-            }
-
-            allParsed = false;
-            break;
-          }
-
-          if (assignment.property === "import") {
-            importParts.push(value);
-          } else {
-            configParts[
-              assignment.property === "rootVars" ? "root" : assignment.property
-            ] = value;
-          }
-        }
-
-        if (importParts.length > 0) {
-          const ensureGlobal = (): Record<string, unknown> => {
-            configParts.global = configParts.global ?? {};
-            return configParts.global as Record<string, unknown>;
-          };
-
-          for (const entryGroup of importParts) {
-            const entries = Array.isArray(entryGroup)
-              ? entryGroup
-              : [entryGroup];
-            for (const entry of entries) {
-              if (
-                typeof entry === "object" && entry !== null &&
-                !Array.isArray(entry) && "tailwind" in entry
-              ) {
-                const currentTailwind = configParts.tailwind;
-                configParts.tailwind = currentTailwind === undefined
-                  ? (entry as { tailwind: unknown }).tailwind
-                  : [
-                    ...(Array.isArray(currentTailwind)
-                      ? currentTailwind
-                      : [currentTailwind]),
-                    (entry as { tailwind: unknown }).tailwind,
-                  ];
-                continue;
-              }
-
-              if (
-                typeof entry === "string" ||
-                (typeof entry === "object" && entry !== null && "path" in entry)
-              ) {
-                const currentGlobal = ensureGlobal();
-                currentGlobal["@import"] = currentGlobal["@import"] ?? [];
-                if (Array.isArray(currentGlobal["@import"])) {
-                  currentGlobal["@import"].push(entry);
-                } else {
-                  currentGlobal["@import"] = [currentGlobal["@import"], entry];
-                }
-              } else if (typeof entry === "object" && entry !== null) {
-                if ("rules" in entry) {
-                  const ruleObj = entry as { layer?: string; rules: unknown };
-                  if (ruleObj.layer && typeof ruleObj.layer === "string") {
-                    const currentGlobal = ensureGlobal();
-                    currentGlobal[`@layer ${ruleObj.layer}`] = ruleObj.rules;
                   } else if (
-                    ruleObj.rules && typeof ruleObj.rules === "object"
+                    assignment.property === "variant" && partialParsed.variant
                   ) {
-                    const currentGlobal = ensureGlobal();
-                    Object.assign(currentGlobal, ruleObj.rules);
+                    configParts.variant = partialParsed.variant;
+                  } else if (
+                    assignment.property === "defaults" && partialParsed.defaults
+                  ) {
+                    configParts.defaults = partialParsed.defaults;
+                  } else if (
+                    assignment.property === "tailwindCss" &&
+                    partialParsed.tailwindCss
+                  ) {
+                    configParts.tailwindCss = partialParsed.tailwindCss;
+                  } else if (assignment.property === "tailwind") {
+                    configParts.tailwind = partialParsed.tailwind;
                   }
-                } else {
+                  if ((partialParsed.imports?.length ?? 0) > 0) {
+                    importParts.push(partialParsed.imports!);
+                  }
+                  continue;
+                }
+              }
+
+              allParsed = false;
+              break;
+            }
+
+            if (assignment.property === "import") {
+              importParts.push(value);
+            } else if (assignment.property === "importModule") {
+              configParts.modules = {
+                ...(configParts.modules as Record<string, string> ?? {}),
+                ...(value as Record<string, string>),
+              };
+            } else {
+              configParts[
+                assignment.property === "rootVars" ? "root" : assignment.property
+              ] = value;
+            }
+          }
+
+          if (importParts.length > 0) {
+            const ensureGlobal = (): Record<string, unknown> => {
+              configParts.global = configParts.global ?? {};
+              return configParts.global as Record<string, unknown>;
+            };
+
+            for (const entryGroup of importParts) {
+              const entries = Array.isArray(entryGroup)
+                ? entryGroup
+                : [entryGroup];
+              for (const entry of entries) {
+                if (
+                  typeof entry === "object" && entry !== null &&
+                  !Array.isArray(entry) && "tailwind" in entry
+                ) {
+                  const currentTailwind = configParts.tailwind;
+                  configParts.tailwind = currentTailwind === undefined
+                    ? (entry as { tailwind: unknown }).tailwind
+                    : [
+                      ...(Array.isArray(currentTailwind)
+                        ? currentTailwind
+                        : [currentTailwind]),
+                      (entry as { tailwind: unknown }).tailwind,
+                    ];
+                  continue;
+                }
+
+                if (
+                  typeof entry === "string" ||
+                  (typeof entry === "object" && entry !== null && "path" in entry)
+                ) {
                   const currentGlobal = ensureGlobal();
-                  Object.assign(currentGlobal, entry);
+                  currentGlobal["@import"] = currentGlobal["@import"] ?? [];
+                  if (Array.isArray(currentGlobal["@import"])) {
+                    currentGlobal["@import"].push(entry);
+                  } else {
+                    currentGlobal["@import"] = [currentGlobal["@import"], entry];
+                  }
+                } else if (typeof entry === "object" && entry !== null) {
+                  if ("rules" in entry) {
+                    const ruleObj = entry as { layer?: string; rules: unknown };
+                    if (ruleObj.layer && typeof ruleObj.layer === "string") {
+                      const currentGlobal = ensureGlobal();
+                      currentGlobal[`@layer ${ruleObj.layer}`] = ruleObj.rules;
+                    } else if (
+                      ruleObj.rules && typeof ruleObj.rules === "object"
+                    ) {
+                      const currentGlobal = ensureGlobal();
+                      Object.assign(currentGlobal, ruleObj.rules);
+                    }
+                  } else {
+                    const currentGlobal = ensureGlobal();
+                    Object.assign(currentGlobal, entry);
+                  }
                 }
               }
             }
           }
-        }
 
-        if (!allParsed) {
-          if (resolution === "static") {
-            throw staticResolutionError(
-              `resolution="static" could not statically resolve assignments for ${decl.varName}`,
-              decl.start,
-            );
-          }
-          replacements.push({
-            start: decl.initializerStart,
-            end: decl.initializerEnd,
-            text: runtimeDeclaration,
-          });
-          continue;
-        }
-
-        const parsed = parseInkConfig(configParts, {
-          utilities: inkConfig.utilities,
-          containers: inkConfig.containers,
-          themeMode: inkConfig.themeMode,
-        });
-        if (!parsed) {
-          if (resolution === "static") {
-            throw staticResolutionError(
-              `resolution="static" could not statically resolve config for ${decl.varName}`,
-              decl.start,
-            );
-          }
-          replacements.push({
-            start: decl.initializerStart,
-            end: decl.initializerEnd,
-            text: runtimeDeclaration,
-          });
-          continue;
-        }
-
-        for (const importPath of parsed.imports ?? []) {
-          const browserPath = toBrowserStylesheetPath(
-            importPath,
-            normalizedId,
-            {
-              projectRoot,
-              viteRoot,
-              viteAliases,
-              tsconfigResolver,
-            },
-          );
-          if (browserPath) {
-            importRules.add(browserPath);
-            logStatic(`import -> ${browserPath}`);
-          }
-        }
-
-        const classMap: Record<string, string> = {};
-        const variantClassMap: Record<
-          string,
-          Record<string, Partial<Record<string, string>>>
-        > = {};
-        const variantGlobalRuleMap: Record<string, Record<string, string[]>> =
-          {};
-        const compiledConfig: Record<string, unknown> = {};
-        if ((parsed.imports?.length ?? 0) > 0) {
-          compiledConfig.imports = true;
-        }
-
-        if ((parsed.tailwindCss?.length ?? 0) > 0) {
-          for (const cssBlock of parsed.tailwindCss ?? []) {
-            rules.add(cssBlock);
-          }
-          compiledConfig.global = true;
-          logStatic(`tailwind css blocks: ${parsed.tailwindCss!.length}`);
-        }
-
-        const extractedGlobalRules = {
-          ...rootVarsToGlobalRules(parsed.root ?? parsed.rootVars),
-          ...(parsed.global ?? {}),
-        };
-        if (Object.keys(extractedGlobalRules).length > 0) {
-          for (
-            const rule of toCssGlobalRules(extractedGlobalRules, {
-              breakpoints: inkConfig.breakpoints,
-              containers: inkConfig.containers,
-              defaultUnit: inkConfig.defaultUnit,
-            })
-          ) {
-            rules.add(rule);
-          }
-          compiledConfig.global = true;
-          for (const selector of Object.keys(extractedGlobalRules)) {
-            logStatic(`global.${selector}`);
-          }
-        }
-
-        for (const [key, style] of Object.entries(parsed.base)) {
-          const generatedClassName = hasStyleDeclarations(style.declaration) ||
-              !hasTailwindClassNames(style)
-            ? createClassName(key, style.declaration, normalizedId)
-            : undefined;
-          const classValue = resolveStyleClassValue(generatedClassName, style);
-          classMap[key] = classValue;
-          if (!generatedClassName) {
+          if (!allParsed) {
+            if (resolution === "static") {
+              throw staticResolutionError(
+                `resolution="static" could not statically resolve assignments for ${decl.varName}`,
+                decl.start,
+              );
+            }
+            replacements.push({
+              start: decl.initializerStart,
+              end: decl.initializerEnd,
+              text: runtimeDeclaration,
+            });
             continue;
           }
-          for (
-            const rule of toCssRules(generatedClassName, style.declaration, {
-              breakpoints: inkConfig.breakpoints,
-              containers: inkConfig.containers,
-              defaultUnit: inkConfig.defaultUnit,
-            })
-          ) {
-            rules.add(rule);
-          }
-        }
-        compiledConfig.base = classMap;
-        for (const [key, className] of Object.entries(classMap)) {
-          logStatic(`base.${key} -> ${className}`);
-        }
 
-        if (parsed.variant) {
-          for (const [group, variants] of Object.entries(parsed.variant)) {
-            const groupMap: Record<string, Partial<Record<string, string>>> =
-              {};
-            for (
-              const [variantName, declarations] of Object.entries(variants)
-            ) {
-              const variantMap: Partial<Record<string, string>> = {};
-              for (const [key, style] of Object.entries(declarations)) {
-                const generatedClassName =
-                  hasStyleDeclarations(style.declaration) ||
-                    !hasTailwindClassNames(style)
-                    ? createClassName(
-                      `${group}:${variantName}:${key}`,
-                      style.declaration,
-                      normalizedId,
-                    )
-                    : undefined;
-                const classValue = resolveStyleClassValue(
-                  generatedClassName,
-                  style,
-                );
-                variantMap[key] = classValue;
-                if (generatedClassName) {
-                  for (
-                    const rule of toCssRules(
-                      generatedClassName,
-                      style.declaration,
-                      {
-                        breakpoints: inkConfig.breakpoints,
-                        containers: inkConfig.containers,
-                        defaultUnit: inkConfig.defaultUnit,
-                      },
-                    )
-                  ) {
-                    rules.add(rule);
-                  }
-                }
-                logStatic(
-                  `variant.${group}.${variantName}.${key} -> ${classValue}`,
-                );
-              }
-              groupMap[variantName] = variantMap;
+          const parsed = parseInkConfig(configParts, {
+            utilities: inkConfig.utilities,
+            containers: inkConfig.containers,
+            themeMode: inkConfig.themeMode,
+          });
+          if (!parsed) {
+            if (resolution === "static") {
+              throw staticResolutionError(
+                `resolution="static" could not statically resolve config for ${decl.varName}`,
+                decl.start,
+              );
             }
-            variantClassMap[group] = groupMap;
+            replacements.push({
+              start: decl.initializerStart,
+              end: decl.initializerEnd,
+              text: runtimeDeclaration,
+            });
+            continue;
           }
-          compiledConfig.variant = variantClassMap;
-        }
 
-        if (parsed.variantGlobal) {
-          for (
-            const [group, variants] of Object.entries(parsed.variantGlobal)
-          ) {
-            const groupMap: Record<string, string[]> = {};
+          for (const importPath of parsed.imports ?? []) {
+            const browserPath = toBrowserStylesheetPath(
+              importPath,
+              normalizedId,
+              {
+                projectRoot,
+                viteRoot,
+                viteAliases,
+                tsconfigResolver,
+              },
+            );
+            if (browserPath) {
+              importRules.add(browserPath);
+              logStatic(`import -> ${browserPath}`);
+            }
+          }
+
+          const classMap: Record<string, string> = {};
+          const variantClassMap: Record<
+            string,
+            Record<string, Partial<Record<string, string>>>
+          > = {};
+          const variantGlobalRuleMap: Record<string, Record<string, string[]>> =
+            {};
+          const compiledConfig: Record<string, unknown> = {};
+          if ((parsed.imports?.length ?? 0) > 0) {
+            compiledConfig.imports = true;
+          }
+
+          if ((parsed.tailwindCss?.length ?? 0) > 0) {
+            for (const cssBlock of parsed.tailwindCss ?? []) {
+              rules.add(cssBlock);
+            }
+            compiledConfig.global = true;
+            logStatic(`tailwind css blocks: ${parsed.tailwindCss!.length}`);
+          }
+
+          const extractedGlobalRules = {
+            ...rootVarsToGlobalRules(parsed.root ?? parsed.rootVars),
+            ...(parsed.global ?? {}),
+          };
+          if (Object.keys(extractedGlobalRules).length > 0) {
             for (
-              const [variantName, declarations] of Object.entries(variants)
-            ) {
-              const variantRules = toCssGlobalRules(declarations, {
+              const rule of toCssGlobalRules(extractedGlobalRules, {
                 breakpoints: inkConfig.breakpoints,
                 containers: inkConfig.containers,
                 defaultUnit: inkConfig.defaultUnit,
-              });
-              groupMap[variantName] = variantRules;
-              logStatic(`variantGlobal.${group}.${variantName}`);
+              })
+            ) {
+              rules.add(rule);
             }
-            variantGlobalRuleMap[group] = groupMap;
+            compiledConfig.global = true;
+            for (const selector of Object.keys(extractedGlobalRules)) {
+              logStatic(`global.${selector}`);
+            }
           }
-          compiledConfig.variantGlobal = variantGlobalRuleMap;
-        }
 
-        const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-        const inkCall = `ink(${runtimeConfigLiteral}, ${
-          JSON.stringify(compiledConfig)
-        }, ${runtimeOptionsLiteral})`;
-        replacements.push({
-          start: decl.initializerStart,
-          end: decl.initializerEnd,
-          text: inkCall,
-        });
+          for (const [key, style] of Object.entries(parsed.base)) {
+            const generatedClassName = hasStyleDeclarations(style.declaration) ||
+                !hasTailwindClassNames(style)
+              ? createClassName(key, style.declaration, normalizedId)
+              : undefined;
+            const classValue = resolveStyleClassValue(generatedClassName, style);
+            classMap[key] = classValue;
+            if (!generatedClassName) {
+              continue;
+            }
+            for (
+              const rule of toCssRules(generatedClassName, style.declaration, {
+                breakpoints: inkConfig.breakpoints,
+                containers: inkConfig.containers,
+                defaultUnit: inkConfig.defaultUnit,
+              })
+            ) {
+              rules.add(rule);
+            }
+          }
+          compiledConfig.base = classMap;
+          for (const [key, className] of Object.entries(classMap)) {
+            logStatic(`base.${key} -> ${className}`);
+          }
 
-        for (const assignment of decl.assignments) {
+          if (parsed.variant) {
+            for (const [group, variants] of Object.entries(parsed.variant)) {
+              const groupMap: Record<string, Partial<Record<string, string>>> =
+                {};
+              for (
+                const [variantName, declarations] of Object.entries(variants)
+              ) {
+                const variantMap: Partial<Record<string, string>> = {};
+                for (const [key, style] of Object.entries(declarations)) {
+                  const generatedClassName =
+                    hasStyleDeclarations(style.declaration) ||
+                      !hasTailwindClassNames(style)
+                      ? createClassName(
+                        `${group}:${variantName}:${key}`,
+                        style.declaration,
+                        normalizedId,
+                      )
+                      : undefined;
+                  const classValue = resolveStyleClassValue(
+                    generatedClassName,
+                    style,
+                  );
+                  variantMap[key] = classValue;
+                  if (generatedClassName) {
+                    for (
+                      const rule of toCssRules(
+                        generatedClassName,
+                        style.declaration,
+                        {
+                          breakpoints: inkConfig.breakpoints,
+                          containers: inkConfig.containers,
+                          defaultUnit: inkConfig.defaultUnit,
+                        },
+                      )
+                    ) {
+                      rules.add(rule);
+                    }
+                  }
+                  logStatic(
+                    `variant.${group}.${variantName}.${key} -> ${classValue}`,
+                  );
+                }
+                groupMap[variantName] = variantMap;
+              }
+              variantClassMap[group] = groupMap;
+            }
+            compiledConfig.variant = variantClassMap;
+          }
+
+          if (parsed.variantGlobal) {
+            for (
+              const [group, variants] of Object.entries(parsed.variantGlobal)
+            ) {
+              const groupMap: Record<string, string[]> = {};
+              for (
+                const [variantName, declarations] of Object.entries(variants)
+              ) {
+                const variantRules = toCssGlobalRules(declarations, {
+                  breakpoints: inkConfig.breakpoints,
+                  containers: inkConfig.containers,
+                  defaultUnit: inkConfig.defaultUnit,
+                });
+                groupMap[variantName] = variantRules;
+                logStatic(`variantGlobal.${group}.${variantName}`);
+              }
+              variantGlobalRuleMap[group] = groupMap;
+            }
+            compiledConfig.variantGlobal = variantGlobalRuleMap;
+          }
+
+          if (parsed.modules) {
+            compiledConfig.modules = parsed.modules;
+          }
+
+          const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
+          const inkCall = `ink(${runtimeConfigLiteral}, ${
+            JSON.stringify(compiledConfig)
+          }, ${runtimeOptionsLiteral})`;
           replacements.push({
-            start: assignment.start,
-            end: assignment.end,
-            text: "",
+            start: decl.initializerStart,
+            end: decl.initializerEnd,
+            text: inkCall,
           });
-        }
-      }
 
-      if (replacements.length === 0) {
-        return null;
-      }
-
-      replacements.sort((a, b) => b.start - a.start);
-
-      for (const replacement of replacements) {
-        nextCode = nextCode.slice(0, replacement.start) +
-          replacement.text +
-          nextCode.slice(replacement.end);
-      }
-
-      nextCode = stripUnusedStaticHelperConsts(nextCode);
-      const needsTailwindRuntimeImport =
-        nextCode.includes('"tailwindClassNames"') ||
-        /\btw\s*\(/.test(nextCode);
-      managedModules.add(normalizedId);
-      updateModuleStaticDependencies(normalizedId, staticDependencies);
-      addWatchFiles(this, staticDependencies);
-
-      let didVirtualCssChange = false;
-      let scopedVirtualImport: string | null = null;
-
-      if (isSvelte) {
-        nextCode = addVirtualImportToSvelte(nextCode);
-        if (needsTailwindRuntimeImport) {
-          nextCode = addVirtualImportToSvelte(
-            nextCode,
-            PUBLIC_TAILWIND_RUNTIME_ID,
-          );
-        }
-        const nextImports = Array.from(importRules);
-        const prevImports = moduleImports.get(normalizedId) ?? [];
-        const importsChanged = nextImports.length !== prevImports.length ||
-          nextImports.some((entry, index) => entry !== prevImports[index]);
-        if (importsChanged) {
-          if (nextImports.length > 0) {
-            moduleImports.set(normalizedId, nextImports);
-          } else {
-            moduleImports.delete(normalizedId);
+          for (const assignment of decl.assignments) {
+            replacements.push({
+              start: assignment.start,
+              end: assignment.end,
+              text: "",
+            });
           }
-          didVirtualCssChange = true;
         }
 
-        const nextCss = mergeCss(rules);
-        const prevCss = moduleCss.get(normalizedId) ?? "";
-        if (prevCss !== nextCss) {
-          if (nextCss.length > 0) {
-            moduleCss.set(normalizedId, nextCss);
-          } else {
-            moduleCss.delete(normalizedId);
-          }
-          didVirtualCssChange = true;
+        if (replacements.length === 0) {
+          return null;
         }
-      } else {
-        nextCode = isAstro
-          ? addVirtualImportToAstro(nextCode)
-          : addVirtualImport(nextCode);
-        if (needsTailwindRuntimeImport) {
+
+        replacements.sort((a, b) => b.start - a.start);
+
+        for (const replacement of replacements) {
+          nextCode = nextCode.slice(0, replacement.start) +
+            replacement.text +
+            nextCode.slice(replacement.end);
+        }
+
+        nextCode = stripUnusedStaticHelperConsts(nextCode);
+        const needsTailwindRuntimeImport =
+          nextCode.includes('"tailwindClassNames"') ||
+          /\btw\s*\(/.test(nextCode);
+        managedModules.add(normalizedId);
+        updateModuleStaticDependencies(normalizedId, staticDependencies);
+        addWatchFiles(this, staticDependencies);
+
+        let didVirtualCssChange = false;
+        let scopedVirtualImport: string | null = null;
+
+        if (isSvelte) {
+          nextCode = addVirtualImportToSvelte(nextCode);
+          if (needsTailwindRuntimeImport) {
+            nextCode = addVirtualImportToSvelte(
+              nextCode,
+              PUBLIC_TAILWIND_RUNTIME_ID,
+            );
+          }
+          const nextImports = Array.from(importRules);
+          const prevImports = moduleImports.get(normalizedId) ?? [];
+          const importsChanged = nextImports.length !== prevImports.length ||
+            nextImports.some((entry, index) => entry !== prevImports[index]);
+          if (importsChanged) {
+            if (nextImports.length > 0) {
+              moduleImports.set(normalizedId, nextImports);
+            } else {
+              moduleImports.delete(normalizedId);
+            }
+            didVirtualCssChange = true;
+          }
+
+          const nextCss = mergeCss(rules);
+          const prevCss = moduleCss.get(normalizedId) ?? "";
+          if (prevCss !== nextCss) {
+            if (nextCss.length > 0) {
+              moduleCss.set(normalizedId, nextCss);
+            } else {
+              moduleCss.delete(normalizedId);
+            }
+            didVirtualCssChange = true;
+          }
+        } else {
           nextCode = isAstro
-            ? addVirtualImportToAstro(nextCode, PUBLIC_TAILWIND_RUNTIME_ID)
-            : addVirtualImport(nextCode, PUBLIC_TAILWIND_RUNTIME_ID);
-        }
-        const nextImports = Array.from(importRules);
-        const prevImports = moduleImports.get(normalizedId) ?? [];
-        const importsChanged = nextImports.length !== prevImports.length ||
-          nextImports.some((entry, index) => entry !== prevImports[index]);
-        if (importsChanged) {
-          if (nextImports.length > 0) {
-            moduleImports.set(normalizedId, nextImports);
-          } else {
-            moduleImports.delete(normalizedId);
+            ? addVirtualImportToAstro(nextCode)
+            : addVirtualImport(nextCode);
+          if (needsTailwindRuntimeImport) {
+            nextCode = isAstro
+              ? addVirtualImportToAstro(nextCode, PUBLIC_TAILWIND_RUNTIME_ID)
+              : addVirtualImport(nextCode, PUBLIC_TAILWIND_RUNTIME_ID);
           }
-          didVirtualCssChange = true;
-        }
-
-        const nextCss = mergeCss(rules);
-        const prevCss = moduleCss.get(normalizedId) ?? "";
-        if (prevCss !== nextCss) {
-          if (nextCss.length > 0) {
-            moduleCss.set(normalizedId, nextCss);
-          } else {
-            moduleCss.delete(normalizedId);
+          const nextImports = Array.from(importRules);
+          const prevImports = moduleImports.get(normalizedId) ?? [];
+          const importsChanged = nextImports.length !== prevImports.length ||
+            nextImports.some((entry, index) => entry !== prevImports[index]);
+          if (importsChanged) {
+            if (nextImports.length > 0) {
+              moduleImports.set(normalizedId, nextImports);
+            } else {
+              moduleImports.delete(normalizedId);
+            }
+            didVirtualCssChange = true;
           }
-          didVirtualCssChange = true;
+
+          const nextCss = mergeCss(rules);
+          const prevCss = moduleCss.get(normalizedId) ?? "";
+          if (prevCss !== nextCss) {
+            if (nextCss.length > 0) {
+              moduleCss.set(normalizedId, nextCss);
+            } else {
+              moduleCss.delete(normalizedId);
+            }
+            didVirtualCssChange = true;
+          }
+
+          if (nextImports.length > 0 || nextCss.length > 0) {
+            scopedVirtualImport = moduleVirtualImportId(normalizedId);
+          }
         }
 
-        if (nextImports.length > 0 || nextCss.length > 0) {
-          scopedVirtualImport = moduleVirtualImportId(normalizedId);
+        if (scopedVirtualImport) {
+          nextCode = isAstro
+            ? addModuleVirtualImportToAstro(nextCode, scopedVirtualImport)
+            : addVirtualImport(nextCode, scopedVirtualImport);
         }
-      }
+        if (didVirtualCssChange) {
+          invalidateVirtualModules(scopedVirtualImport ? [normalizedId] : []);
+        }
 
-      if (scopedVirtualImport) {
-        nextCode = isAstro
-          ? addModuleVirtualImportToAstro(nextCode, scopedVirtualImport)
-          : addVirtualImport(nextCode, scopedVirtualImport);
-      }
-      if (didVirtualCssChange) {
-        invalidateVirtualModules(scopedVirtualImport ? [normalizedId] : []);
-      }
-
-      return {
-        code: nextCode,
-        map: null,
+        return {
+          code: nextCode,
+          map: null,
+        };
       };
+
+      const hasImportModule = /\.importModule\s*\(/.test(code);
+      if (hasImportModule) {
+        return (async () => {
+          const currentModuleInfo = parseModuleStaticInfo(code);
+          if (currentModuleInfo && this?.load) {
+            for (const decl of newInkDecls) {
+              for (const assign of decl.assignments) {
+                if (assign.property === "importModule") {
+                  const binding = currentModuleInfo.imports.get(assign.valueSource.trim());
+                  if (binding && (binding.source.includes(".module.css") || binding.source.includes(".module.scss") || binding.source.includes(".module.sass") || binding.source.includes(".module.less"))) {
+                    const resolvedImportFile = resolveImportToFile(
+                      normalizedId,
+                      binding.source,
+                      {
+                        projectRoot,
+                        viteRoot,
+                        viteAliases,
+                        tsconfigResolver,
+                      },
+                    );
+                    if (resolvedImportFile) {
+                      try {
+                        const loaded = await this.load({ id: resolvedImportFile });
+                        if (loaded && loaded.code) {
+                          const cssModuleInfo = parseModuleStaticInfo(loaded.code);
+                          moduleInfoCache.set(resolvedImportFile, cssModuleInfo);
+                          if (cssModuleInfo.defaultExportExpression) {
+                            const parsedMapping = parseStaticExpression(
+                              cssModuleInfo.defaultExportExpression,
+                              (nestedPath) => {
+                                const head = nestedPath[0];
+                                const initializerInfo = cssModuleInfo.constInitializers.get(head);
+                                if (initializerInfo) {
+                                  const val = parseStaticExpression(initializerInfo.initializer);
+                                  if (val !== null) {
+                                    return nestedPath.length > 1
+                                      ? readMemberPath(val, nestedPath.slice(1))
+                                      : val;
+                                  }
+                                }
+                                return undefined;
+                              }
+                            );
+                            if (parsedMapping && typeof parsedMapping === "object") {
+                              cssModuleMappings.set(
+                                assign.valueSource.trim(),
+                                parsedMapping as Record<string, string>,
+                              );
+                            }
+                          }
+                        }
+                      } catch (e) {
+                        // ignore and proceed
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          return runSync();
+        })();
+      } else {
+        return runSync();
+      }
     },
 
     handleHotUpdate(ctx: { file: string; timestamp?: number }) {

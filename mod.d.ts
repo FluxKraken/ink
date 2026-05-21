@@ -72,6 +72,7 @@ type InkConfig<
   base?: T;
   variant?: V;
   defaults?: VariantSelection<V>;
+  modules?: Record<string, string>;
 };
 type SimpleVariantSheet = Record<string, Record<string, StyleDeclarationInput>>;
 type SimpleVariantSelection<V extends SimpleVariantSheet | undefined> =
@@ -91,6 +92,7 @@ type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   base?: StyleDeclarationInput;
   variant?: V;
   defaults?: SimpleVariantSelection<V>;
+  modules?: Record<string, string>;
 };
 type InkRuntimeOptions = {
   breakpoints?: Record<string, string>;
@@ -111,6 +113,7 @@ type CompiledConfig<T extends StyleSheetInput> = {
   global?: true;
   base?: CompiledMap<T>;
   variant?: VariantClassMap<T>;
+  modules?: Record<string, string>;
 };
 type VariantSelection<V extends VariantSheet<any> | undefined> = V extends
   VariantSheet<any> ? { [G in keyof V]?: VariantSelectionValue<keyof V[G]> }
@@ -121,7 +124,7 @@ type Accessor<
 > = string extends keyof T ? Record<string, any>
   : {
     [K in keyof T]: StyleAccessor<V>;
-  };
+  } & Record<string, any>;
 type StyleAccessor<V extends VariantSheet<any> | undefined> =
   & ((variants?: VariantSelection<V>) => string)
   & {
@@ -133,7 +136,8 @@ type InkSimpleStyleAccessor<V extends SimpleVariantSheet | undefined> =
   & {
     class: (variants?: SimpleVariantSelection<V>) => string;
     style: (variants?: SimpleVariantSelection<V>) => string;
-  };
+  }
+  & Record<string, any>;
 type InkBuilderOptions = {
   simple?: boolean;
 };
@@ -155,6 +159,7 @@ type InkBuilder<
     defaults: VariantSelection<V> | undefined;
     tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
     tailwindCss: readonly string[] | undefined;
+    modules: Record<string, string> | undefined;
     addContainer: (
       container: {
         name: string;
@@ -164,6 +169,9 @@ type InkBuilder<
     ) => InkBuilder<T, V>;
     import: (
       inputs: import("./dist/shared.d.ts").ImportInput,
+    ) => InkBuilder<T, V>;
+    importModule: (
+      moduleData: Record<string, string>,
     ) => InkBuilder<T, V>;
   };
 type InkSimpleBuilder<V extends SimpleVariantSheet | undefined> =
@@ -180,6 +188,7 @@ type InkSimpleBuilder<V extends SimpleVariantSheet | undefined> =
     defaults: SimpleVariantSelection<V> | undefined;
     tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
     tailwindCss: readonly string[] | undefined;
+    modules: Record<string, string> | undefined;
     addContainer: (
       container: {
         name: string;
@@ -189,6 +198,9 @@ type InkSimpleBuilder<V extends SimpleVariantSheet | undefined> =
     ) => InkSimpleBuilder<V>;
     import: (
       inputs: import("./dist/shared.d.ts").ImportInput,
+    ) => InkSimpleBuilder<V>;
+    importModule: (
+      moduleData: Record<string, string>,
     ) => InkSimpleBuilder<V>;
   };
 

@@ -102,6 +102,8 @@ type InkConfig<
   tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
   /** Pre-serialized Tailwind CSS emitted into the global stylesheet. */
   tailwindCss?: readonly string[];
+  /** Mapped class name mappings from CSS modules. */
+  modules?: Record<string, string>;
 };
 type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   /** Enable the single-slot shorthand mode. */
@@ -126,6 +128,8 @@ type InkSimpleConfig<V extends SimpleVariantSheet | undefined> = {
   tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
   /** Pre-serialized Tailwind CSS emitted into the global stylesheet. */
   tailwindCss?: readonly string[];
+  /** Mapped class name mappings from CSS modules. */
+  modules?: Record<string, string>;
 };
 /** Build-time precompiled config passed as the second argument to `ink()`. */
 type CompiledConfig<T extends StyleSheetInput> = {
@@ -139,6 +143,8 @@ type CompiledConfig<T extends StyleSheetInput> = {
   variant?: VariantClassMap<T>;
   /** Precompiled variant-scoped global CSS rules. */
   variantGlobal?: VariantGlobalRuleMap;
+  /** Precompiled class name mappings from CSS modules. */
+  modules?: Record<string, string>;
 };
 /** Runtime options merged from `ink.config.ts` and passed as the third argument to `ink()`. */
 type InkRuntimeOptions = CssSerializationOptions & {
@@ -174,7 +180,7 @@ type Accessor<
 > = string extends keyof T ? Record<string, any>
   : {
     [K in keyof T]: StyleAccessor<V>;
-  };
+  } & Record<string, any>;
 type InkSimpleStyleAccessor<V extends SimpleVariantSheet | undefined> =
   & ((variants?: SimpleVariantSelection<V>) => string)
   & {
@@ -182,7 +188,7 @@ type InkSimpleStyleAccessor<V extends SimpleVariantSheet | undefined> =
     class: (variants?: SimpleVariantSelection<V>) => string;
     /** Return an inline style string for the shorthand style. */
     style: (variants?: SimpleVariantSelection<V>) => string;
-  };
+  } & Record<string, any>;
 /** Callable accessor for a single style key that returns class names or inline styles. */
 type StyleAccessor<V extends VariantSheet<any> | undefined> =
   & ((variants?: VariantSelection<V>) => string)
@@ -540,6 +546,7 @@ function normalizeStyleDeclarationInput(
     utilities?: NormalizedStyleSheet;
     containers?: Record<string, { type?: string; rule: string }>;
     allowTailwind?: boolean;
+    modules?: Record<string, string>;
   } = {},
   tailwindMode: "class" | "css" = "class",
 ): ResolvedStyleDefinition {
@@ -681,6 +688,7 @@ function normalizeApplyInput(
     utilities?: NormalizedStyleSheet;
     containers?: Record<string, { type?: string; rule: string }>;
     allowTailwind?: boolean;
+    modules?: Record<string, string>;
   },
 ): ResolvedStyleDefinition {
   const allowTailwind = options.allowTailwind !== false;
@@ -720,6 +728,9 @@ function normalizeApplyInput(
   }
 
   if (typeof value === "string") {
+    if (options.modules?.[value]) {
+      return createResolvedStyleDefinition({}, [options.modules[value]]);
+    }
     const utility = options.utilities?.[value];
     if (!utility) {
       return createResolvedStyleDefinition();
@@ -815,6 +826,7 @@ function normalizeStyleSheetInput(
     utilities?: NormalizedStyleSheet;
     containers?: Record<string, { type?: string; rule: string }>;
     allowTailwind?: boolean;
+    modules?: Record<string, string>;
   } = {},
 ): NormalizedStyleSheet {
   const normalized: NormalizedStyleSheet = {};
@@ -1044,6 +1056,10 @@ function compileAccessorFactory<
     imports,
     utilities,
     containers: runtimeOptions.containers,
+    modules: {
+      ...(config.modules ?? {}),
+      ...((compiled as any)?.modules ?? {}),
+    },
   };
   const cssOptions: CssSerializationOptions = {
     breakpoints: runtimeOptions.breakpoints,
@@ -1409,6 +1425,22 @@ function compileAccessorFactory<
     }
   }
 
+  const mergedModules = {
+    ...(config.modules ?? {}),
+    ...((compiled as any)?.modules ?? {}),
+  };
+  if (Object.keys(mergedModules).length > 0) {
+    for (const [key, hashedClassName] of Object.entries(mergedModules)) {
+      if (!(key in accessors)) {
+        const classAccessor = (): string => hashedClassName as string;
+        const accessor = classAccessor as any;
+        accessor.class = classAccessor;
+        accessor.style = () => "";
+        accessors[key] = accessor;
+      }
+    }
+  }
+
   const factory = () => accessors;
   return new Proxy(factory, {
     get(target, prop, receiver) {
@@ -1469,6 +1501,7 @@ function compileSimpleConfig<V extends SimpleVariantSheet | undefined>(
     >,
     tailwind: config.tailwind,
     tailwindCss: config.tailwindCss,
+    modules: config.modules,
   };
   const factory = compileAccessorFactory(
     wrappedConfig,
@@ -1476,9 +1509,27 @@ function compileSimpleConfig<V extends SimpleVariantSheet | undefined>(
     runtimeOptions,
     managedTagIds,
   );
-  const accessor = (factory() as Record<string, InkSimpleStyleAccessor<V>>)[
+  const fullAccessors = factory();
+  const accessor = (fullAccessors as Record<string, InkSimpleStyleAccessor<V>>)[
     SIMPLE_STYLE_KEY
   ] ?? createEmptySimpleStyleAccessor<V>();
+
+  const mergedModules = {
+    ...(config.modules ?? {}),
+    ...((compiled as any)?.modules ?? {}),
+  };
+  for (const key of Object.keys(mergedModules)) {
+    if (key !== SIMPLE_STYLE_KEY && !(key in accessor)) {
+      Object.defineProperty(accessor, key, {
+        get() {
+          return fullAccessors[key];
+        },
+        enumerable: true,
+        configurable: true,
+      });
+    }
+  }
+
   return accessor;
 }
 
@@ -1525,6 +1576,7 @@ const CONFIG_KEYS = new Set([
   "defaults",
   "tailwind",
   "tailwindCss",
+  "modules",
 ]);
 
 function normalizeConfigKey(key: string): string {
@@ -1587,10 +1639,14 @@ type InkBuilder<
   tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
   /** Pre-serialized Tailwind/global CSS emitted into the global stylesheet. */
   tailwindCss: readonly string[] | undefined;
+  /** Mapped class name mappings from CSS modules. */
+  modules: Record<string, string> | undefined;
   /** Register a container preset for `@set` and `@<name>` shorthand at runtime. */
   addContainer(container: ContainerDefinitionInput): InkBuilder<T, V>;
   /** Add styles or external CSS files to the global stylesheet. */
   import(inputs: import("./shared.js").ImportInput): InkBuilder<T, V>;
+  /** Import class name mappings from a CSS module. */
+  importModule(moduleData: Record<string, string>): InkBuilder<T, V>;
 } & Accessor<T, V>;
 
 type InkSimpleBuilder<
@@ -1616,10 +1672,14 @@ type InkSimpleBuilder<
   tailwind: TailwindConfigInput | readonly TailwindConfigInput[] | undefined;
   /** Pre-serialized Tailwind/global CSS emitted into the global stylesheet. */
   tailwindCss: readonly string[] | undefined;
+  /** Mapped class name mappings from CSS modules. */
+  modules: Record<string, string> | undefined;
   /** Register a container preset for `@set` and `@<name>` shorthand at runtime. */
   addContainer(container: ContainerDefinitionInput): InkSimpleBuilder<V>;
   /** Add styles or external CSS files to the global stylesheet. */
   import(inputs: import("./shared.js").ImportInput): InkSimpleBuilder<V>;
+  /** Import class name mappings from a CSS module. */
+  importModule(moduleData: Record<string, string>): InkSimpleBuilder<V>;
 } & InkSimpleStyleAccessor<V>;
 
 function createInkBuilder<
@@ -1776,6 +1836,17 @@ function createInkBuilder<
     }
 
     cachedFactory = null;
+    return proxy;
+  };
+
+  proxy.importModule = (moduleData: unknown) => {
+    if (typeof moduleData === "object" && moduleData !== null) {
+      config.modules = {
+        ...(config.modules ?? {}),
+        ...(moduleData as Record<string, string>),
+      };
+      cachedFactory = null;
+    }
     return proxy;
   };
 
@@ -1937,6 +2008,17 @@ function createInkSimpleBuilder<
     }
 
     cachedAccessor = null;
+    return proxy;
+  };
+
+  proxy.importModule = (moduleData: unknown) => {
+    if (typeof moduleData === "object" && moduleData !== null) {
+      config.modules = {
+        ...(config.modules ?? {}),
+        ...(moduleData as Record<string, string>),
+      };
+      cachedAccessor = null;
+    }
     return proxy;
   };
 

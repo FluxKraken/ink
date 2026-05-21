@@ -60,6 +60,7 @@ type InkConfig = {
   defaults?: VariantSelection;
   tailwind?: TailwindConfigInput | readonly TailwindConfigInput[];
   tailwindCss?: string[];
+  modules?: Record<string, string>;
 };
 
 type RootVarEntry =
@@ -73,6 +74,7 @@ type ParseInkOptions = {
   utilities?: NormalizedStyleSheet;
   containers?: Record<string, { type?: string; rule: string }>;
   themeMode?: ThemeMode;
+  modules?: Record<string, string>;
 };
 
 type IdentifierReference = {
@@ -1041,6 +1043,9 @@ function normalizeApplyValue(
   }
 
   if (typeof value === "string") {
+    if (options.modules?.[value]) {
+      return createResolvedStyleDefinition({}, [options.modules[value]]);
+    }
     const utility = options.utilities?.[value];
     if (!utility) {
       return createResolvedStyleDefinition();
@@ -1842,6 +1847,7 @@ export function parseInkConfig(
     "defaults",
     "tailwind",
     "tailwindCss",
+    "modules",
   ]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
@@ -1854,6 +1860,13 @@ export function parseInkConfig(
     ...options,
     imports,
   };
+
+  if ("modules" in value) {
+    if (typeof value.modules !== "object" || value.modules === null || Array.isArray(value.modules)) {
+      return null;
+    }
+    parseOptions.modules = value.modules as Record<string, string>;
+  }
 
   const simple = value.simple === true;
   if ("simple" in value && typeof value.simple !== "boolean") {
@@ -1998,6 +2011,7 @@ export function parseInkConfig(
     variantGlobal,
     defaults,
     tailwindCss,
+    modules: value.modules as Record<string, string> | undefined,
   };
 }
 
@@ -2659,6 +2673,41 @@ export function findNewInkDeclarations(code: string): NewInkDeclaration[] {
         valueSource,
       });
       importMatcher.lastIndex = end;
+    }
+
+    const importModuleMatcher = new RegExp(
+      `\\b${varName}\\.importModule\\s*(?=\\()`,
+      "g",
+    );
+    importModuleMatcher.lastIndex = declEnd;
+
+    for (
+      let imMatch = importModuleMatcher.exec(searchable);
+      imMatch;
+      imMatch = importModuleMatcher.exec(searchable)
+    ) {
+      const assignStart = imMatch.index;
+      const valueStart = imMatch.index + imMatch[0].length;
+      const valueEnd = findExpressionTerminator(code, valueStart);
+      let valueSource = code.slice(valueStart, valueEnd).trim();
+
+      if (valueSource.startsWith("(") && valueSource.endsWith(");")) {
+        valueSource = valueSource.slice(1, -2).trim();
+      } else if (valueSource.startsWith("(") && valueSource.endsWith(")")) {
+        valueSource = valueSource.slice(1, -1).trim();
+      }
+
+      const end = valueEnd < code.length && code[valueEnd] === ";"
+        ? valueEnd + 1
+        : valueEnd;
+
+      assignments.push({
+        property: "importModule",
+        start: assignStart,
+        end,
+        valueSource,
+      });
+      importModuleMatcher.lastIndex = end;
     }
 
     declarations.push({
