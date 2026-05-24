@@ -239,6 +239,77 @@ Deno.test("svelte component CSS is extracted into virtual stylesheet", () => {
   );
 });
 
+Deno.test("statically evaluates mixed default and named ink imports in svelte assignments", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib/components`, { recursive: true });
+    Deno.mkdirSync(`${root}/src/lib/styles`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/settings.ts`,
+      `export default { pageWidth: "70rem" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/utilities.ts`,
+      `export default {\n` +
+        `  responsiveWidth: ({ width }: { width: string }) => ` +
+        "`min(${width}, 100%)`,\n" +
+        `} as const;\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({
+      root,
+      resolve: {
+        alias: [
+          { find: "@styles", replacement: `${root}/src/lib/styles` },
+        ],
+      },
+    });
+
+    const source = `<script lang="ts">\n` +
+      `import ink, { tw, tVar } from "@kraken/ink";\n` +
+      `import Settings from "@styles/settings";\n` +
+      `import Utilities from "@styles/utilities";\n` +
+      `const styles = new ink({ simple: true });\n` +
+      `styles.base = {\n` +
+      `  "@apply": tw("prose max-w-none"),\n` +
+      `  background: tVar.contentBackground,\n` +
+      `  width: Utilities.responsiveWidth({ width: Settings.pageWidth }),\n` +
+      `};\n` +
+      `</script>\n\n` +
+      `<main class={styles()}></main>`;
+
+    const transformed = transform(
+      source,
+      `${root}/src/lib/components/Content.svelte`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.includes('import "virtual:ink/tailwind-merge";'));
+    assert(code.includes('"tailwindClassNames":["prose max-w-none"]'));
+    assert(code.includes('prose max-w-none"}'));
+    assert(!code.includes("new ink("));
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes("background:var(--content-background)"));
+    assert(css.includes("width:min(70rem, 100%)"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("preserves existing svelte style block while extracting ink CSS", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);

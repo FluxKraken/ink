@@ -880,7 +880,21 @@ function parseModuleStaticInfo(code: string): ModuleStaticInfo {
     });
   }
 
-  const importMatcher = /import\s*{([\s\S]*?)}\s*from\s*["']([^"']+)["']/g;
+  const mixedNamespaceImportMatcher =
+    /import\s+(?!type\b)[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*\*\s*as\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*from\s*["']([^"']+)["']/g;
+  for (
+    let match = mixedNamespaceImportMatcher.exec(code);
+    match;
+    match = mixedNamespaceImportMatcher.exec(code)
+  ) {
+    imports.set(match[1], {
+      source: match[2],
+      kind: "namespace",
+    });
+  }
+
+  const importMatcher =
+    /import(?!\s+type\b)\s*(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)?{([\s\S]*?)}\s*from\s*["']([^"']+)["']/g;
   for (
     let match = importMatcher.exec(code);
     match;
