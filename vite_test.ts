@@ -1072,7 +1072,7 @@ Deno.test("breakpoint boundary mode switches hard at the breakpoint", () => {
   );
   assertEquals(
     toCssRules("test", { "!@lg": { display: "none" } }, { breakpoints }),
-    ["@media (width <= 64rem){.test{display:none}}"],
+    ["@media (width < 64rem){.test{display:none}}"],
   );
   assertEquals(
     toCssRules(
@@ -1082,7 +1082,7 @@ Deno.test("breakpoint boundary mode switches hard at the breakpoint", () => {
     ),
     [
       "@media (width > 64rem){.test{display:block}}",
-      "@media (width < 64rem){.test{display:none}}",
+      "@media (width <= 64rem){.test{display:none}}",
     ],
   );
 });
@@ -1246,7 +1246,7 @@ Deno.test("toCssRules resolves breakpoint shorthand and ranges", () => {
 
   assert(rules.includes(".test{display:grid}"));
   assert(rules.includes("@media (width >= 40rem){.test{gap:1rem}}"));
-  assert(rules.includes("@media (width <= 40rem){.test{padding:2rem}}"));
+  assert(rules.includes("@media (width < 40rem){.test{padding:2rem}}"));
   assert(
     rules.includes(
       "@media (30rem < width < 80rem){.test{grid-template-columns:1fr 1fr}}",
@@ -4401,7 +4401,7 @@ Deno.test("loads ink.config.ts utilities and breakpoint aliases", () => {
     );
     assertMatch(
       css,
-      /@media \(width <= 48rem\)\{\.ink_[a-z0-9]+\{grid-template-columns:1fr\}\}/,
+      /@media \(width < 48rem\)\{\.ink_[a-z0-9]+\{grid-template-columns:1fr\}\}/,
     );
   } finally {
     Deno.removeSync(root, { recursive: true });

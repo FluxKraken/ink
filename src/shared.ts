@@ -1386,7 +1386,8 @@ function isSupportedAtRule(key: string): boolean {
 
 function resolveAtRule(key: string, options?: CssSerializationOptions): string {
   const breakpointBoundary = options?.breakpointBoundary ?? "inclusive";
-  const reverseBoundary = breakpointBoundary === "exclusive" || breakpointBoundary === "reverse";
+  const reverseBoundary = breakpointBoundary === "exclusive" ||
+    breakpointBoundary === "reverse";
 
   if (key.startsWith("$")) {
     const scope = key.slice(1);
@@ -1403,8 +1404,8 @@ function resolveAtRule(key: string, options?: CssSerializationOptions): string {
     const reverseBreakpoint = options?.breakpoints?.[reverseAliasMatch[1]];
     if (reverseBreakpoint) {
       return reverseBoundary
-        ? `@media (width < ${reverseBreakpoint})`
-        : `@media (width <= ${reverseBreakpoint})`;
+        ? `@media (width <= ${reverseBreakpoint})`
+        : `@media (width < ${reverseBreakpoint})`;
     }
     return key;
   }

@@ -1,6 +1,6 @@
 {
   "name": "@kraken/ink",
-  "version": "0.5.41",
+  "version": "0.5.42",
   "license": "MIT",
   "exports": {
     ".": "./mod.ts",
