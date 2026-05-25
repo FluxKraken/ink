@@ -283,6 +283,8 @@ export interface InkConfigFile {
   debug?: InkConfigDebugOptions;
   /** Named breakpoint aliases used by `@md`, `!@md`, and ranges. */
   breakpoints?: Record<string, string | number>;
+  /** Breakpoint boundary mode for `@md` / `!@md` media queries. */
+  breakpointBoundary?: "inclusive" | "exclusive" | "reverse";
   /** Named container presets used by `@set`, `@card`, and container ranges. */
   containers?: Record<string, InkConfigContainer> | readonly (
     InkConfigContainer & { name: string }
@@ -318,6 +320,8 @@ export type ImportInput = SingularImportInput | readonly SingularImportInput[];
 export interface CssSerializationOptions {
   /** Named breakpoint aliases (for example `{ md: "48rem" }` used as `"@md"`). */
   breakpoints?: Record<string, string>;
+  /** Breakpoint boundary mode for `@md` / `!@md` media queries. */
+  breakpointBoundary?: "inclusive" | "exclusive" | "reverse";
   /** Named container presets (for example `{ card: { type: "inline-size", rule: "width < 20rem" } }`). */
   containers?: Record<string, { type?: string; rule: string }>;
   /** Default unit for numeric style values (for example `"px"` or `"rem"`). */
@@ -1381,6 +1385,9 @@ function isSupportedAtRule(key: string): boolean {
 }
 
 function resolveAtRule(key: string, options?: CssSerializationOptions): string {
+  const breakpointBoundary = options?.breakpointBoundary ?? "inclusive";
+  const reverseBoundary = breakpointBoundary === "exclusive" || breakpointBoundary === "reverse";
+
   if (key.startsWith("$")) {
     const scope = key.slice(1);
     const selector = toThemeScopeSelector(scope);
@@ -1395,7 +1402,9 @@ function resolveAtRule(key: string, options?: CssSerializationOptions): string {
   if (reverseAliasMatch) {
     const reverseBreakpoint = options?.breakpoints?.[reverseAliasMatch[1]];
     if (reverseBreakpoint) {
-      return `@media (width <= ${reverseBreakpoint})`;
+      return reverseBoundary
+        ? `@media (width < ${reverseBreakpoint})`
+        : `@media (width <= ${reverseBreakpoint})`;
     }
     return key;
   }
@@ -1433,7 +1442,9 @@ function resolveAtRule(key: string, options?: CssSerializationOptions): string {
     return key;
   }
 
-  return `@media (width >= ${breakpoint})`;
+  return reverseBoundary
+    ? `@media (width > ${breakpoint})`
+    : `@media (width >= ${breakpoint})`;
 }
 
 function collectCssRules(

@@ -148,6 +148,7 @@ type LoadedInkConfig = {
     logStatic: boolean;
   };
   breakpoints: Record<string, string>;
+  breakpointBoundary: "inclusive" | "exclusive" | "reverse";
   containers: Record<string, { type?: string; rule: string }>;
   layers: string[];
   defaultUnit?: string;
@@ -157,6 +158,7 @@ type LoadedInkConfig = {
   utilityCss: string;
   runtimeOptions: {
     breakpoints?: Record<string, string>;
+    breakpointBoundary?: "inclusive" | "exclusive" | "reverse";
     containers?: Record<string, { type?: string; rule: string }>;
     layers?: string[];
     defaultUnit?: string;
@@ -1098,6 +1100,17 @@ function normalizeBreakpoints(value: unknown): Record<string, string> {
   return normalized;
 }
 
+function normalizeBreakpointBoundary(value: unknown):
+  | "inclusive"
+  | "exclusive"
+  | "reverse" {
+  if (value === "exclusive" || value === "reverse") {
+    return value;
+  }
+
+  return "inclusive";
+}
+
 function normalizeDefaultUnit(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
@@ -1823,6 +1836,7 @@ function loadInkConfig(
         logStatic: false,
       },
       breakpoints: {},
+      breakpointBoundary: "inclusive",
       containers: {},
       layers: [],
       defaultUnit: undefined,
@@ -1832,6 +1846,7 @@ function loadInkConfig(
       utilityCss: "",
       runtimeOptions: {
         themeMode: "color-scheme",
+        breakpointBoundary: "inclusive",
       },
     };
   }
@@ -1917,6 +1932,9 @@ function loadInkConfig(
   const themeMode = normalizeThemeMode(configObject.themeMode);
   const debug = normalizeDebugOptions(configObject.debug);
   const breakpoints = normalizeBreakpoints(configObject.breakpoints);
+  const breakpointBoundary = normalizeBreakpointBoundary(
+    configObject.breakpointBoundary,
+  );
   const containers = normalizeContainers(configObject.containers);
   const layers = normalizeLayers(configObject.layers);
   const defaultUnit = normalizeDefaultUnit(configObject.defaultUnit);
@@ -2026,6 +2044,7 @@ function loadInkConfig(
     hasExplicitResolution,
     debug,
     breakpoints,
+    breakpointBoundary,
     containers,
     layers,
     defaultUnit,
@@ -3240,7 +3259,8 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       logDynamic: false,
       logStatic: false,
     },
-    breakpoints: {},
+      breakpoints: {},
+      breakpointBoundary: "inclusive",
     containers: {},
     layers: [],
     defaultUnit: undefined,
@@ -3250,6 +3270,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     utilityCss: "",
     runtimeOptions: {
       themeMode: "color-scheme",
+      breakpointBoundary: "inclusive",
     },
   };
   let resolverInitialized = false;
@@ -3796,6 +3817,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             for (
               const rule of toCssGlobalRules(extractedGlobalRules, {
                 breakpoints: inkConfig.breakpoints,
+                breakpointBoundary: inkConfig.breakpointBoundary,
                 containers: inkConfig.containers,
                 defaultUnit: inkConfig.defaultUnit,
               })
@@ -3825,6 +3847,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             for (
               const rule of toCssRules(generatedClassName, style.declaration, {
                 breakpoints: inkConfig.breakpoints,
+                breakpointBoundary: inkConfig.breakpointBoundary,
                 containers: inkConfig.containers,
                 defaultUnit: inkConfig.defaultUnit,
               })
@@ -3867,6 +3890,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                         style.declaration,
                         {
                           breakpoints: inkConfig.breakpoints,
+                          breakpointBoundary: inkConfig.breakpointBoundary,
                           containers: inkConfig.containers,
                           defaultUnit: inkConfig.defaultUnit,
                         },
@@ -3896,6 +3920,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               ) {
                 const variantRules = toCssGlobalRules(declarations, {
                   breakpoints: inkConfig.breakpoints,
+                  breakpointBoundary: inkConfig.breakpointBoundary,
                   containers: inkConfig.containers,
                   defaultUnit: inkConfig.defaultUnit,
                 });
@@ -4257,6 +4282,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             for (
               const rule of toCssGlobalRules(extractedGlobalRules, {
                 breakpoints: inkConfig.breakpoints,
+                breakpointBoundary: inkConfig.breakpointBoundary,
                 containers: inkConfig.containers,
                 defaultUnit: inkConfig.defaultUnit,
               })
@@ -4286,6 +4312,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             for (
               const rule of toCssRules(generatedClassName, style.declaration, {
                 breakpoints: inkConfig.breakpoints,
+                breakpointBoundary: inkConfig.breakpointBoundary,
                 containers: inkConfig.containers,
                 defaultUnit: inkConfig.defaultUnit,
               })
@@ -4328,6 +4355,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                         style.declaration,
                         {
                           breakpoints: inkConfig.breakpoints,
+                          breakpointBoundary: inkConfig.breakpointBoundary,
                           containers: inkConfig.containers,
                           defaultUnit: inkConfig.defaultUnit,
                         },
@@ -4357,6 +4385,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               ) {
                 const variantRules = toCssGlobalRules(declarations, {
                   breakpoints: inkConfig.breakpoints,
+                  breakpointBoundary: inkConfig.breakpointBoundary,
                   containers: inkConfig.containers,
                   defaultUnit: inkConfig.defaultUnit,
                 });

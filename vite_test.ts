@@ -1063,6 +1063,30 @@ Deno.test("toCssDeclaration and toCssRules support configurable defaultUnit", ()
   assert(rules.includes(".test{margin-block:2ch}"));
 });
 
+Deno.test("breakpoint boundary mode switches hard at the breakpoint", () => {
+  const breakpoints = { lg: "64rem" };
+
+  assertEquals(
+    toCssRules("test", { "@lg": { display: "block" } }, { breakpoints }),
+    ["@media (width >= 64rem){.test{display:block}}"],
+  );
+  assertEquals(
+    toCssRules("test", { "!@lg": { display: "none" } }, { breakpoints }),
+    ["@media (width <= 64rem){.test{display:none}}"],
+  );
+  assertEquals(
+    toCssRules(
+      "test",
+      { "@lg": { display: "block" }, "!@lg": { display: "none" } },
+      { breakpoints, breakpointBoundary: "exclusive" },
+    ),
+    [
+      "@media (width > 64rem){.test{display:block}}",
+      "@media (width < 64rem){.test{display:none}}",
+    ],
+  );
+});
+
 Deno.test("toCssDeclaration supports flexible font variation settings", () => {
   assertEquals(
     toCssDeclaration("fontVariationSettings", "'slnt' -10, 'wght' 100"),
