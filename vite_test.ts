@@ -6,10 +6,16 @@ import {
 } from "jsr:@std/assert";
 import { dirname, join, toFileUrl } from "jsr:@std/path";
 import { twMerge } from "npm:tailwind-merge";
+import * as TypeScript from "npm:typescript";
 import { inkVite } from "./src/vite.ts";
 import { getNextThemeName, resolveManagedThemeEntries } from "./src/react.ts";
 import ink from "./src/runtime.ts";
 import { convertCssToTypeScript, runCli } from "./src/cli.ts";
+import {
+  collectTransformTargets,
+  parseModuleStaticInfo,
+  type TypeScriptAstApi,
+} from "./src/ast.ts";
 import {
   findNewInkDeclarations,
   parseInkCallArguments,
@@ -39,6 +45,131 @@ function scopedVirtualId(moduleId: string): string {
     encodeURIComponent(moduleId)
   }`;
 }
+
+const TEST_TYPESCRIPT = TypeScript as unknown as TypeScriptAstApi;
+const TEST_INK_IMPORT_SOURCES = ["@kraken/ink", "@jsr/kraken__ink"] as const;
+
+function collectTestTargets(
+  code: string,
+  id: string,
+  offset = 0,
+) {
+  const targets = collectTransformTargets({
+    typescript: TEST_TYPESCRIPT,
+    code,
+    id,
+    offset,
+    inkImportSources: TEST_INK_IMPORT_SOURCES,
+  });
+  assert(targets !== null);
+  return targets;
+}
+
+Deno.test("shared AST collector discovers TSX imports, aliases, and shadowing", () => {
+  const source = `import css, { tw } from "@kraken/ink";\n` +
+    `const styles = new css({ simple: true });\n` +
+    `styles.base = { "@apply": tw("prose max-w-none") };\n` +
+    `function demo(css: unknown) {\n` +
+    `  return css({ base: { nope: { color: "red" } } });\n` +
+    `}\n` +
+    `export const View = () => <main className={styles()} />;\n`;
+
+  const targets = collectTestTargets(source, "/app/src/Content.tsx");
+  assertEquals(targets.newInkDecls.length, 1);
+  assertEquals(targets.newInkDecls[0].varName, "styles");
+  assertEquals(targets.newInkDecls[0].constructorSource, "css");
+  assertEquals(targets.newInkDecls[0].simple, true);
+  assertEquals(targets.newInkDecls[0].assignments.length, 1);
+  assertEquals(targets.calls.length, 0);
+});
+
+Deno.test("shared AST collector discovers namespace and mixed Ink imports", () => {
+  const namespaceTargets = collectTestTargets(
+    `import * as Ink from "@kraken/ink";\n` +
+      `const styles = new Ink.default();\n` +
+      `styles.base = { card: { display: "grid" } };\n`,
+    "/app/src/namespace.ts",
+  );
+  assertEquals(namespaceTargets.newInkDecls.length, 1);
+
+  const mixedTargets = collectTestTargets(
+    `import css, { tVar as token } from "@jsr/kraken__ink";\n` +
+      `const styles = css({ base: { card: { color: token.contentText } } });\n`,
+    "/app/src/mixed.ts",
+  );
+  assertEquals(mixedTargets.calls.length, 1);
+  assertEquals(mixedTargets.calls[0].callee, "css");
+});
+
+Deno.test("shared AST collector offsets Svelte script and Astro frontmatter regions", () => {
+  const svelte = `<script lang="ts">\n` +
+    `import ink from "@kraken/ink";\n` +
+    `const styles = ink({ base: { card: { display: "grid" } } });\n` +
+    `</script>\n<div>ink({ base: { nope: {} } })</div>`;
+  const svelteStart = svelte.indexOf("\n") + 1;
+  const svelteEnd = svelte.indexOf("</script>");
+  const svelteTargets = collectTestTargets(
+    svelte.slice(svelteStart, svelteEnd),
+    "/app/src/Card.svelte?ink-script=instance",
+    svelteStart,
+  );
+  assertEquals(svelteTargets.calls.length, 1);
+  assertEquals(svelteTargets.calls[0].start, svelte.indexOf("ink({"));
+
+  const astro = `---\n` +
+    `import ink from "@kraken/ink";\n` +
+    `const styles = new ink();\n` +
+    `styles.base = { card: { display: "grid" } };\n` +
+    `---\n<div>new ink()</div>`;
+  const astroStart = astro.indexOf("\n") + 1;
+  const astroEnd = astro.indexOf("\n---", astroStart);
+  const astroTargets = collectTestTargets(
+    astro.slice(astroStart, astroEnd),
+    "/app/src/Card.astro?ink-frontmatter",
+    astroStart,
+  );
+  assertEquals(astroTargets.newInkDecls.length, 1);
+  assertEquals(
+    astroTargets.newInkDecls[0].initializerStart,
+    astro.indexOf("new ink()"),
+  );
+});
+
+Deno.test("AST module parser handles imports, exports, and TS syntax", () => {
+  const source =
+    `import css, { tw as merge, type ThemeMode } from "@kraken/ink";\n` +
+    `import * as tokens from "./tokens";\n` +
+    `import type { ReactNode } from "react";\n` +
+    `const base: Record<string, unknown> = { display: "grid" } as const;\n` +
+    `export const card = { base, className: merge("prose") } satisfies Record<string, unknown>;\n` +
+    `function helper<T>(value: T): T { return value; }\n` +
+    `export { helper as makeHelper };\n` +
+    `export default { card, tokens } as const;\n`;
+
+  const info = parseModuleStaticInfo(
+    source,
+    "/app/src/styles.ts",
+    TEST_TYPESCRIPT,
+  );
+  assertEquals(info.imports.get("css"), {
+    source: "@kraken/ink",
+    kind: "default",
+  });
+  assertEquals(info.imports.get("merge"), {
+    source: "@kraken/ink",
+    kind: "named",
+    imported: "tw",
+  });
+  assertEquals(info.imports.get("tokens"), {
+    source: "./tokens",
+    kind: "namespace",
+  });
+  assertEquals(info.imports.has("ThemeMode"), false);
+  assertEquals(info.constInitializers.has("base"), true);
+  assertEquals(info.exportedConsts.get("card"), "card");
+  assertEquals(info.exportedConsts.get("makeHelper"), "helper");
+  assert(info.defaultExportExpression?.includes("{ card, tokens }"));
+});
 
 function asHook(
   hook: unknown,
@@ -310,6 +441,73 @@ Deno.test("statically evaluates mixed default and named ink imports in svelte as
   }
 });
 
+Deno.test("extracts Svelte module scripts through shared AST discovery", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const source = `<script module lang="ts">\n` +
+    `import css from "@kraken/ink";\n` +
+    `const moduleStyles = new css();\n` +
+    `moduleStyles.base = { content: { color: "red" } };\n` +
+    `</script>\n` +
+    `<script lang="ts">\n` +
+    `import ink from "@kraken/ink";\n` +
+    `const localStyles = ink({ base: { card: { display: "grid" } } });\n` +
+    `</script>\n` +
+    `<main>new ink()</main>`;
+
+  const transformed = transform(source, "/app/src/lib/ModuleScripts.svelte");
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const code = transformed.code as string;
+  assert(!code.includes("new css("));
+  assert(code.includes("<main>new ink()</main>"));
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(css, /\.ink_[a-z0-9]+\{color:red\}/);
+  assertMatch(css, /\.ink_[a-z0-9]+\{display:grid\}/);
+});
+
+Deno.test("extracts legacy Svelte context module scripts", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const source = `<script context="module" lang="ts">\n` +
+    `import ink from "@kraken/ink";\n` +
+    `const styles = new ink();\n` +
+    `styles.base = { card: { color: "red" } };\n` +
+    `</script>\n<section class="card"></section>`;
+
+  const transformed = transform(
+    source,
+    "/app/src/lib/ContextModule.svelte",
+  );
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const code = transformed.code as string;
+  assert(!code.includes("new ink()"));
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(css, /\.ink_[a-z0-9]+\{color:red\}/);
+});
+
+Deno.test("ignores Svelte files without script or imported styles usage", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  assertEquals(
+    transform(
+      `<main>new ink({ base: { nope: {} } })</main>`,
+      "/app/src/NoScript.svelte",
+    ),
+    null,
+  );
+});
+
 Deno.test("preserves existing svelte style block while extracting ink CSS", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
@@ -441,6 +639,34 @@ Deno.test("injects virtual stylesheet import and extracts css for new ink() usag
   const loaded = load(VIRTUAL_ID);
   assertEquals(typeof loaded, "string");
   assertMatch(loaded as string, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
+});
+
+Deno.test("extracts Astro frontmatter aliases and ignores markup ink text", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const source = `---\n` +
+    `import css, { tw } from "@kraken/ink";\n` +
+    `const delimiter = "---";\n` +
+    `const template = \`frontmatter --- stays open\`;\n` +
+    `// new css()\n` +
+    `const styles = new css();\n` +
+    `styles.base = { card: { "@apply": tw("prose max-w-none") } };\n` +
+    `---\n` +
+    `<div>new ink({ base: { nope: {} } })</div>`;
+
+  const transformed = transform(source, "/app/src/pages/alias.astro");
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const code = transformed.code as string;
+  assert(!code.includes("const styles = new css"));
+  assert(code.includes("const styles = css("));
+  assert(code.includes("<div>new ink({ base: { nope: {} } })</div>"));
+  assert(code.includes('"tailwindClassNames":["prose max-w-none"]'));
+  assertEquals(load(VIRTUAL_ID), "");
 });
 
 Deno.test("injects plain virtual import when astro transform input is already JS-shaped", () => {
@@ -7222,7 +7448,7 @@ Deno.test("extracts css from CSS Module imported and resolved at build-time", as
 
   try {
     Deno.mkdirSync(`${root}/src`, { recursive: true });
-    
+
     const cssModulePath = `${root}/src/button.module.css`;
     Deno.writeTextFileSync(cssModulePath, `.myButton { background: black; }`);
 
@@ -7255,15 +7481,22 @@ Deno.test("extracts css from CSS Module imported and resolved at build-time", as
       },
     };
 
-    const transformedResult = await transform.call(context, componentCode, importerPath);
+    const transformedResult = await transform.call(
+      context,
+      componentCode,
+      importerPath,
+    );
     assert(
-      transformedResult && typeof transformedResult === "object" && "code" in transformedResult,
+      transformedResult && typeof transformedResult === "object" &&
+        "code" in transformedResult,
     );
 
     const transformedCode = transformedResult.code as string;
-    
+
     assert(!transformedCode.includes("importModule(CSS)"));
-    assert(transformedCode.includes('"modules":{"myButton":"_myButton_1a2b3_1"}'));
+    assert(
+      transformedCode.includes('"modules":{"myButton":"_myButton_1a2b3_1"}'),
+    );
 
     const css = load(scopedVirtualId(importerPath));
     assertEquals(css, "");
@@ -7278,7 +7511,7 @@ Deno.test("extracts css from CSS Module in simple builder style resolved at buil
 
   try {
     Deno.mkdirSync(`${root}/src`, { recursive: true });
-    
+
     const cssModulePath = `${root}/src/button.module.css`;
     Deno.writeTextFileSync(cssModulePath, `.myButton { background: black; }`);
 
@@ -7309,15 +7542,22 @@ Deno.test("extracts css from CSS Module in simple builder style resolved at buil
       },
     };
 
-    const transformedResult = await transform.call(context, componentCode, importerPath);
+    const transformedResult = await transform.call(
+      context,
+      componentCode,
+      importerPath,
+    );
     assert(
-      transformedResult && typeof transformedResult === "object" && "code" in transformedResult,
+      transformedResult && typeof transformedResult === "object" &&
+        "code" in transformedResult,
     );
 
     const transformedCode = transformedResult.code as string;
-    
+
     assert(!transformedCode.includes("importModule(CSS)"));
-    assert(transformedCode.includes('"modules":{"myButton":"_myButton_simple"}'));
+    assert(
+      transformedCode.includes('"modules":{"myButton":"_myButton_simple"}'),
+    );
 
     const css = load(scopedVirtualId(importerPath));
     assertEquals(css, "");

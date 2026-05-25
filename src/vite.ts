@@ -1,5 +1,4 @@
 import {
-  findExpressionTerminator,
   findInkCalls,
   findNewInkDeclarations,
   parseInkBuilderOptions,
@@ -32,6 +31,14 @@ import {
   tVar,
   tw,
 } from "./shared.js";
+import {
+  type AstNewInkDeclaration,
+  type AstTransformTargets,
+  collectTransformTargets,
+  type ImportBinding,
+  type ModuleStaticInfo,
+  parseModuleStaticInfo,
+} from "./ast.js";
 
 const PUBLIC_VIRTUAL_ID = "virtual:ink/styles.css";
 const RESOLVED_VIRTUAL_ID = "\0virtual:ink/styles.css";
@@ -77,32 +84,6 @@ const PROJECT_ROOT_MARKERS = [
   "deno.json",
   "tsconfig.json",
 ] as const;
-
-type ImportBinding =
-  | {
-    source: string;
-    kind: "named";
-    imported: string;
-  }
-  | {
-    source: string;
-    kind: "namespace";
-  }
-  | {
-    source: string;
-    kind: "default";
-  };
-
-type ModuleStaticInfo = {
-  imports: Map<string, ImportBinding>;
-  constInitializers: Map<
-    string,
-    { initializer: string; start: number; end: number; exported: boolean }
-  >;
-  functionDeclarations: Map<string, string>;
-  exportedConsts: Map<string, string>;
-  defaultExportExpression: string | null;
-};
 
 type ViteAliasEntry = {
   find: string | RegExp;
@@ -229,38 +210,23 @@ type TypeScriptAstApi = TypeScriptTranspileApi & {
   SyntaxKind: Record<string, number>;
   forEachChild: (node: unknown, cbNode: (node: unknown) => void) => void;
 };
-type AstInkCall = {
-  start: number;
-  end: number;
-  arg: string;
+type SourceRegion = {
+  code: string;
+  id: string;
+  offset: number;
 };
-type AstNewInkAssignment = {
-  property: string;
-  start: number;
-  end: number;
-  valueSource: string;
+type SvelteCompilerApi = {
+  parse: (
+    source: string,
+    options?: { modern?: boolean; filename?: string },
+  ) => unknown;
 };
-type AstNewInkDeclaration = {
-  varName: string;
-  start: number;
-  initializerStart: number;
-  initializerEnd: number;
-  optionsSource?: string;
-  hasStaticOptions: boolean;
-  simple: boolean;
-  hasAddContainerCall: boolean;
-  assignments: AstNewInkAssignment[];
-};
-type AstTransformTargets = {
-  calls: AstInkCall[];
-  newInkDecls: AstNewInkDeclaration[];
-};
-
 let nodeFs: NodeFs | null | undefined;
 let nodePath: NodePath | null | undefined;
 let nodeRequire: NodeRequire | null | undefined;
 let typeScriptModule: TypeScriptTranspileApi | null | undefined;
 let tsTranspiler: ((source: string) => string) | null | undefined;
+const svelteCompilerCache = new Map<string, SvelteCompilerApi | null>();
 
 function getBuiltinModule(id: string): unknown | null {
   const processValue = (globalThis as { process?: unknown }).process;
@@ -305,6 +271,19 @@ function getNodeRequire(): NodeRequire | null {
 
   nodeRequire = getFallbackRequire();
   return nodeRequire;
+}
+
+function createRequireFromPath(path: string): NodeRequire | null {
+  const moduleBuiltin = getBuiltinModule("node:module") as NodeModule | null;
+  if (moduleBuiltin && typeof moduleBuiltin.createRequire === "function") {
+    try {
+      return moduleBuiltin.createRequire(path) as NodeRequire;
+    } catch {
+      // fall through to the shared fallback require
+    }
+  }
+
+  return getNodeRequire();
 }
 
 function isTypeScriptTranspileApi(
@@ -414,6 +393,10 @@ function getTypeScriptAstApi(): TypeScriptAstApi | null {
   }
 
   return typescript as TypeScriptAstApi;
+}
+
+function parseStaticModuleInfo(code: string, id: string): ModuleStaticInfo {
+  return parseModuleStaticInfo(code, id, getTypeScriptAstApi());
 }
 
 function getNodeFs(): NodeFs {
@@ -599,17 +582,6 @@ function resolveStaticInkImport(
   return tail.length > 0 ? readMemberPath(importedValue, tail) : importedValue;
 }
 
-function hasInkImport(code: string): boolean {
-  for (const source of INK_IMPORT_SOURCES) {
-    if (
-      code.includes(`from "${source}"`) || code.includes(`from '${source}'`)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function isVirtualSubRequest(id: string): boolean {
   return id.includes("?");
 }
@@ -780,6 +752,267 @@ function addModuleVirtualImportToAstro(code: string, importId: string): string {
     code.slice(insertAt);
 }
 
+function loadProjectSvelteCompiler(
+  projectRoot: string,
+  viteRoot: string,
+): SvelteCompilerApi | null {
+  const cacheKey = `${projectRoot}\0${viteRoot}`;
+  if (svelteCompilerCache.has(cacheKey)) {
+    return svelteCompilerCache.get(cacheKey) ?? null;
+  }
+
+  const roots = Array.from(new Set([projectRoot, viteRoot]));
+  for (const root of roots) {
+    const packageJsonPath = getNodePath().join(root, "package.json");
+    const requireBase = getNodeFs().existsSync(packageJsonPath)
+      ? packageJsonPath
+      : getNodePath().join(root, "noop.js");
+    const requireFn = createRequireFromPath(requireBase);
+    if (!requireFn) {
+      continue;
+    }
+
+    try {
+      const loaded = requireFn("svelte/compiler") as {
+        parse?: unknown;
+        default?: unknown;
+      };
+      const candidate = typeof loaded?.parse === "function"
+        ? loaded
+        : loaded?.default;
+      if (
+        candidate && typeof candidate === "object" &&
+        typeof (candidate as { parse?: unknown }).parse === "function"
+      ) {
+        const compiler = candidate as SvelteCompilerApi;
+        svelteCompilerCache.set(cacheKey, compiler);
+        return compiler;
+      }
+    } catch {
+      // Svelte is optional; the local extractor below handles this path.
+    }
+  }
+
+  svelteCompilerCache.set(cacheKey, null);
+  return null;
+}
+
+function readSvelteContentRegion(
+  ast: unknown,
+  key: "module" | "instance",
+  code: string,
+  id: string,
+): SourceRegion | null {
+  const section = (ast as Record<string, unknown> | null)?.[key] as {
+    content?: unknown;
+  } | null;
+  const content = section?.content as {
+    start?: unknown;
+    end?: unknown;
+  } | null;
+  if (
+    !content ||
+    typeof content.start !== "number" ||
+    typeof content.end !== "number" ||
+    content.start > content.end
+  ) {
+    return null;
+  }
+
+  return {
+    code: code.slice(content.start, content.end),
+    id: `${id}?ink-script=${key}`,
+    offset: content.start,
+  };
+}
+
+function extractSvelteScriptRegionsFallback(
+  code: string,
+  id: string,
+): SourceRegion[] {
+  const regions: SourceRegion[] = [];
+  const matcher = /<script\b[^>]*>/gi;
+  for (let match = matcher.exec(code); match; match = matcher.exec(code)) {
+    const start = match.index + match[0].length;
+    const close = code.toLowerCase().indexOf("</script>", start);
+    if (close === -1) {
+      break;
+    }
+    regions.push({
+      code: code.slice(start, close),
+      id: `${id}?ink-script=${regions.length}`,
+      offset: start,
+    });
+    matcher.lastIndex = close + "</script>".length;
+  }
+  return regions;
+}
+
+function extractSvelteScriptRegions(
+  code: string,
+  id: string,
+  projectRoot: string,
+  viteRoot: string,
+): SourceRegion[] {
+  const compiler = loadProjectSvelteCompiler(projectRoot, viteRoot);
+  if (compiler) {
+    try {
+      const ast = compiler.parse(code, { modern: true, filename: id });
+      const regions = [
+        readSvelteContentRegion(ast, "module", code, id),
+        readSvelteContentRegion(ast, "instance", code, id),
+      ].filter((region): region is SourceRegion => region !== null)
+        .sort((a, b) => a.offset - b.offset);
+      if (regions.length > 0) {
+        return regions;
+      }
+    } catch {
+      // Fall back to the local extractor if the optional compiler cannot parse.
+    }
+  }
+
+  return extractSvelteScriptRegionsFallback(code, id);
+}
+
+function extractAstroFrontmatterRegion(
+  code: string,
+  id: string,
+): SourceRegion | null {
+  const opening = code.match(/^\uFEFF?---[ \t]*(?:\r?\n|$)/);
+  if (!opening) {
+    return null;
+  }
+
+  const start = opening[0].length;
+  const closeMatcher = /^---[ \t]*(?:\r?\n|$)/gm;
+  closeMatcher.lastIndex = start;
+  const close = closeMatcher.exec(code);
+  if (!close) {
+    return null;
+  }
+
+  return {
+    code: code.slice(start, close.index),
+    id: `${id}?ink-frontmatter`,
+    offset: start,
+  };
+}
+
+function isJsShapedAstroInput(code: string): boolean {
+  return /^(?:import|export|const|let|var|function|async\s+function|class)\b/
+    .test(code.trimStart());
+}
+
+function extractTransformSourceRegions(
+  code: string,
+  id: string,
+  options: {
+    isSvelte: boolean;
+    isAstro: boolean;
+    projectRoot: string;
+    viteRoot: string;
+  },
+): SourceRegion[] {
+  if (options.isSvelte) {
+    const scripts = extractSvelteScriptRegions(
+      code,
+      id,
+      options.projectRoot,
+      options.viteRoot,
+    );
+    return scripts.length > 0 || !isJsShapedAstroInput(code)
+      ? scripts
+      : [{ code, id, offset: 0 }];
+  }
+
+  if (options.isAstro) {
+    const frontmatter = extractAstroFrontmatterRegion(code, id);
+    if (frontmatter) {
+      return [frontmatter];
+    }
+    return isJsShapedAstroInput(code) ? [{ code, id, offset: 0 }] : [];
+  }
+
+  return [{ code, id, offset: 0 }];
+}
+
+function mergeSourceRegions(regions: readonly SourceRegion[]): string {
+  return regions.map((region) => region.code).join("\n");
+}
+
+function collectTransformTargetsFromRegions(
+  regions: readonly SourceRegion[],
+): AstTransformTargets | null {
+  const typescript = getTypeScriptAstApi();
+  if (!typescript) {
+    return null;
+  }
+
+  const calls: AstTransformTargets["calls"] = [];
+  const newInkDecls: AstTransformTargets["newInkDecls"] = [];
+  for (const region of regions) {
+    const targets = collectTransformTargets({
+      typescript,
+      code: region.code,
+      id: region.id,
+      offset: region.offset,
+      inkImportSources: INK_IMPORT_SOURCES,
+    });
+    if (!targets) {
+      return null;
+    }
+    calls.push(...targets.calls);
+    newInkDecls.push(...targets.newInkDecls);
+  }
+
+  return { calls, newInkDecls };
+}
+
+function collectLegacyTransformTargetsFromRegions(
+  regions: readonly SourceRegion[],
+): AstTransformTargets {
+  const newInkDecls: AstNewInkDeclaration[] = [];
+  for (const region of regions) {
+    const offset = region.offset;
+    for (const decl of findNewInkDeclarations(region.code)) {
+      newInkDecls.push({
+        varName: decl.varName,
+        start: decl.start + offset,
+        initializerStart: decl.initializerStart + offset,
+        initializerEnd: decl.initializerEnd + offset,
+        constructorSource: "ink",
+        optionsSource: decl.optionsSource,
+        hasStaticOptions: decl.hasStaticOptions,
+        simple: decl.simple,
+        hasAddContainerCall: new RegExp(
+          `\\b${decl.varName}\\.addContainer\\s*\\(`,
+        ).test(region.code),
+        assignments: decl.assignments.map((assignment) => ({
+          property: assignment.property,
+          start: assignment.start + offset,
+          end: assignment.end + offset,
+          valueSource: assignment.valueSource,
+        })),
+      });
+    }
+  }
+
+  const calls = regions.flatMap((region) =>
+    findInkCalls(region.code).map((call) => ({
+      start: call.start + region.offset,
+      end: call.end + region.offset,
+      callee: "ink",
+      arg: call.arg,
+    }))
+  ).filter((call) =>
+    !newInkDecls.some((decl) =>
+      call.start >= decl.initializerStart && call.end <= decl.initializerEnd
+    )
+  );
+
+  return { calls, newInkDecls };
+}
+
 function moduleVirtualImportId(moduleId: string): string {
   return `${PUBLIC_VIRTUAL_ID}?${MODULE_VIRTUAL_QUERY_KEY}=${
     encodeURIComponent(moduleId)
@@ -805,403 +1038,6 @@ function readModuleVirtualImportId(id: string): string | null {
 
 function mergeCss(rules: Iterable<string>): string {
   return Array.from(rules).join("\n");
-}
-
-function parseBindingList(
-  specifierList: string,
-): Array<{ local: string; imported: string }> {
-  const bindings: Array<{ local: string; imported: string }> = [];
-
-  for (const rawSpecifier of specifierList.split(",")) {
-    const specifier = rawSpecifier.replace(/\s+/g, " ").trim();
-    if (!specifier) {
-      continue;
-    }
-
-    const normalized = specifier.replace(/^type\s+/, "").trim();
-    if (!normalized) {
-      continue;
-    }
-
-    const asMatch = normalized.match(
-      /^([A-Za-z_$][A-Za-z0-9_$]*)\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)$/,
-    );
-    if (asMatch) {
-      bindings.push({
-        imported: asMatch[1],
-        local: asMatch[2],
-      });
-      continue;
-    }
-
-    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(normalized)) {
-      bindings.push({
-        imported: normalized,
-        local: normalized,
-      });
-    }
-  }
-
-  return bindings;
-}
-
-function parseModuleStaticInfo(code: string): ModuleStaticInfo {
-  const imports = new Map<string, ImportBinding>();
-  const constInitializers = new Map<
-    string,
-    { initializer: string; start: number; end: number; exported: boolean }
-  >();
-  const functionDeclarations = new Map<string, string>();
-  const exportedConsts = new Map<string, string>();
-
-  const defaultImportMatcher =
-    /import\s+(?!type\b)([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:,\s*(?:\{[\s\S]*?\}|\*\s*as\s*[A-Za-z_$][A-Za-z0-9_$]*))?\s*from\s*["']([^"']+)["']/g;
-  for (
-    let match = defaultImportMatcher.exec(code);
-    match;
-    match = defaultImportMatcher.exec(code)
-  ) {
-    imports.set(match[1], {
-      source: match[2],
-      kind: "default",
-    });
-  }
-
-  const namespaceImportMatcher =
-    /import\s*\*\s*as\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*from\s*["']([^"']+)["']/g;
-  for (
-    let match = namespaceImportMatcher.exec(code);
-    match;
-    match = namespaceImportMatcher.exec(code)
-  ) {
-    imports.set(match[1], {
-      source: match[2],
-      kind: "namespace",
-    });
-  }
-
-  const mixedNamespaceImportMatcher =
-    /import\s+(?!type\b)[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*\*\s*as\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*from\s*["']([^"']+)["']/g;
-  for (
-    let match = mixedNamespaceImportMatcher.exec(code);
-    match;
-    match = mixedNamespaceImportMatcher.exec(code)
-  ) {
-    imports.set(match[1], {
-      source: match[2],
-      kind: "namespace",
-    });
-  }
-
-  const importMatcher =
-    /import(?!\s+type\b)\s*(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)?{([\s\S]*?)}\s*from\s*["']([^"']+)["']/g;
-  for (
-    let match = importMatcher.exec(code);
-    match;
-    match = importMatcher.exec(code)
-  ) {
-    const source = match[2];
-    for (const binding of parseBindingList(match[1])) {
-      imports.set(binding.local, {
-        source,
-        kind: "named",
-        imported: binding.imported,
-      });
-    }
-  }
-
-  const exportListMatcher = /export\s*{([\s\S]*?)}\s*;?/g;
-  for (
-    let match = exportListMatcher.exec(code);
-    match;
-    match = exportListMatcher.exec(code)
-  ) {
-    for (const binding of parseBindingList(match[1])) {
-      exportedConsts.set(binding.local, binding.imported);
-    }
-  }
-
-  const constMatcher = /\b(export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/g;
-  for (
-    let match = constMatcher.exec(code);
-    match;
-    match = constMatcher.exec(code)
-  ) {
-    const isExported = Boolean(match[1]);
-    const name = match[2];
-    let initializerStart = constMatcher.lastIndex;
-
-    while (
-      initializerStart < code.length && /\s/.test(code[initializerStart])
-    ) {
-      initializerStart += 1;
-    }
-
-    if (code[initializerStart] === ":") {
-      initializerStart += 1;
-      let angleDepth = 0;
-      let parenDepth = 0;
-      let bracketDepth = 0;
-      let braceDepth = 0;
-      let inString: "" | '"' | "'" | "`" = "";
-      let escaped = false;
-
-      for (; initializerStart < code.length; initializerStart += 1) {
-        const char = code[initializerStart];
-        if (inString) {
-          if (escaped) {
-            escaped = false;
-            continue;
-          }
-          if (char === "\\") {
-            escaped = true;
-            continue;
-          }
-          if (char === inString) {
-            inString = "";
-          }
-          continue;
-        }
-
-        if (char === '"' || char === "'" || char === "`") {
-          inString = char;
-          continue;
-        }
-
-        if (char === "<") {
-          angleDepth += 1;
-          continue;
-        }
-        if (char === ">") {
-          angleDepth = Math.max(0, angleDepth - 1);
-          continue;
-        }
-        if (char === "(") {
-          parenDepth += 1;
-          continue;
-        }
-        if (char === ")") {
-          parenDepth = Math.max(0, parenDepth - 1);
-          continue;
-        }
-        if (char === "[") {
-          bracketDepth += 1;
-          continue;
-        }
-        if (char === "]") {
-          bracketDepth = Math.max(0, bracketDepth - 1);
-          continue;
-        }
-        if (char === "{") {
-          braceDepth += 1;
-          continue;
-        }
-        if (char === "}") {
-          braceDepth = Math.max(0, braceDepth - 1);
-          continue;
-        }
-
-        if (
-          char === "=" &&
-          angleDepth === 0 &&
-          parenDepth === 0 &&
-          bracketDepth === 0 &&
-          braceDepth === 0
-        ) {
-          break;
-        }
-      }
-    }
-
-    if (code[initializerStart] !== "=") {
-      continue;
-    }
-
-    initializerStart += 1;
-    const initializerEnd = findExpressionTerminator(code, initializerStart);
-    const initializer = code.slice(initializerStart, initializerEnd).trim();
-
-    const declarationEnd =
-      initializerEnd < code.length && code[initializerEnd] === ";"
-        ? initializerEnd + 1
-        : initializerEnd;
-
-    if (initializer.length > 0) {
-      constInitializers.set(name, {
-        initializer,
-        start: match.index,
-        end: declarationEnd,
-        exported: isExported,
-      });
-    }
-
-    if (isExported) {
-      exportedConsts.set(name, name);
-    }
-
-    constMatcher.lastIndex = declarationEnd;
-  }
-
-  const functionMatcher =
-    /\b(export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
-  for (
-    let match = functionMatcher.exec(code);
-    match;
-    match = functionMatcher.exec(code)
-  ) {
-    const isExported = Boolean(match[1]);
-    const name = match[2];
-    let cursor = functionMatcher.lastIndex;
-    let parenDepth = 1;
-    let inString: "" | '"' | "'" | "`" = "";
-    let escaped = false;
-
-    for (; cursor < code.length; cursor += 1) {
-      const char = code[cursor];
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-          continue;
-        }
-        if (char === "\\") {
-          escaped = true;
-          continue;
-        }
-        if (char === inString) {
-          inString = "";
-        }
-        continue;
-      }
-
-      if (char === '"' || char === "'" || char === "`") {
-        inString = char;
-        continue;
-      }
-
-      if (char === "/" && code[cursor + 1] === "/") {
-        cursor += 2;
-        while (cursor < code.length && code[cursor] !== "\n") {
-          cursor += 1;
-        }
-        continue;
-      }
-
-      if (char === "/" && code[cursor + 1] === "*") {
-        cursor += 2;
-        while (
-          cursor < code.length &&
-          !(code[cursor] === "*" && code[cursor + 1] === "/")
-        ) {
-          cursor += 1;
-        }
-        cursor += 1;
-        continue;
-      }
-
-      if (char === "(") {
-        parenDepth += 1;
-        continue;
-      }
-      if (char === ")") {
-        parenDepth -= 1;
-        if (parenDepth === 0) {
-          cursor += 1;
-          break;
-        }
-      }
-    }
-
-    while (cursor < code.length && /\s/.test(code[cursor])) {
-      cursor += 1;
-    }
-
-    if (code[cursor] === ":") {
-      cursor += 1;
-      while (cursor < code.length && code[cursor] !== "{") {
-        cursor += 1;
-      }
-    }
-    while (cursor < code.length && code[cursor] !== "{") {
-      cursor += 1;
-    }
-    if (cursor >= code.length) {
-      continue;
-    }
-
-    let bodyDepth = 0;
-    inString = "";
-    escaped = false;
-
-    for (; cursor < code.length; cursor += 1) {
-      const char = code[cursor];
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-          continue;
-        }
-        if (char === "\\") {
-          escaped = true;
-          continue;
-        }
-        if (char === inString) {
-          inString = "";
-        }
-        continue;
-      }
-
-      if (char === '"' || char === "'" || char === "`") {
-        inString = char;
-        continue;
-      }
-
-      if (char === "/" && code[cursor + 1] === "/") {
-        cursor += 2;
-        while (cursor < code.length && code[cursor] !== "\n") {
-          cursor += 1;
-        }
-        continue;
-      }
-      if (char === "/" && code[cursor + 1] === "*") {
-        cursor += 2;
-        while (
-          cursor < code.length &&
-          !(code[cursor] === "*" && code[cursor + 1] === "/")
-        ) {
-          cursor += 1;
-        }
-        cursor += 1;
-        continue;
-      }
-
-      if (char === "{") {
-        bodyDepth += 1;
-        continue;
-      }
-      if (char === "}") {
-        bodyDepth -= 1;
-        if (bodyDepth === 0) {
-          const declarationSource = code
-            .slice(match.index, cursor + 1)
-            .replace(/^export\s+/, "")
-            .trim();
-          functionDeclarations.set(name, declarationSource);
-          if (isExported) {
-            exportedConsts.set(name, name);
-          }
-          functionMatcher.lastIndex = cursor + 1;
-          break;
-        }
-      }
-    }
-  }
-
-  return {
-    imports,
-    constInitializers,
-    functionDeclarations,
-    exportedConsts,
-    defaultExportExpression: extractDefaultExportExpression(code),
-  };
 }
 
 function findFileUpwards(
@@ -1242,28 +1078,6 @@ function findProjectRoot(searchStart: string): string {
 
 function findTsconfigPath(searchStart: string): string | null {
   return findFileUpwards(searchStart, ["tsconfig.json"]);
-}
-
-function extractDefaultExportExpression(source: string): string | null {
-  const marker = "export default";
-  const markerIndex = source.indexOf(marker);
-  if (markerIndex === -1) {
-    return null;
-  }
-
-  let start = markerIndex + marker.length;
-  while (start < source.length && /\s/.test(source[start])) {
-    start += 1;
-  }
-
-  const end = findExpressionTerminator(source, start);
-  const expression = source.slice(start, end === -1 ? source.length : end)
-    .trim();
-  if (!expression) {
-    return null;
-  }
-
-  return expression.endsWith(";") ? expression.slice(0, -1).trim() : expression;
 }
 
 function normalizeBreakpoints(value: unknown): Record<string, string> {
@@ -1582,8 +1396,269 @@ function containsIdentifierReference(value: unknown): boolean {
   );
 }
 
-function stripUnusedStaticHelperConsts(code: string): string {
-  const moduleInfo = parseModuleStaticInfo(code);
+type StaticModuleResolver = {
+  getModuleInfo: (moduleId: string) => ModuleStaticInfo | null;
+  resolveIdentifierInModule: (
+    identifierPath: readonly string[],
+    moduleId: string,
+  ) => unknown | null;
+  buildEvalScope: (
+    moduleId: string,
+    excludeName?: string,
+    sourceHint?: string,
+  ) => Record<string, unknown>;
+};
+
+function createStaticModuleResolver(options: {
+  moduleInfoCache?: Map<string, ModuleStaticInfo>;
+  loadModuleCode: (moduleId: string) => string | null;
+  resolveImportFile: (moduleId: string, source: string) => string | null;
+  resolveRuntimeImport: (
+    binding: ImportBinding,
+    tail: readonly string[],
+  ) => unknown | null;
+  resolveAssetImport: (
+    binding: ImportBinding,
+    tail: readonly string[],
+    moduleId: string,
+    resolvedImportFile: string | null,
+  ) => unknown | null;
+  resolveExtra?: (
+    identifierPath: readonly string[],
+    moduleId: string,
+  ) => unknown | null;
+}): StaticModuleResolver {
+  const moduleInfoCache = options.moduleInfoCache ?? new Map();
+  const constValueCache = new Map<string, unknown | null>();
+  const resolving = new Set<string>();
+
+  function getModuleInfo(moduleId: string): ModuleStaticInfo | null {
+    const cached = moduleInfoCache.get(moduleId);
+    if (cached) {
+      return cached;
+    }
+    const moduleCode = options.loadModuleCode(moduleId);
+    if (!moduleCode) {
+      return null;
+    }
+    const parsed = parseStaticModuleInfo(moduleCode, moduleId);
+    moduleInfoCache.set(moduleId, parsed);
+    return parsed;
+  }
+
+  function buildEvalScope(
+    moduleId: string,
+    excludeName?: string,
+    sourceHint?: string,
+  ): Record<string, unknown> {
+    const evalScope: Record<string, unknown> = {
+      ...STATIC_EVAL_GLOBALS,
+    };
+    const moduleInfo = getModuleInfo(moduleId);
+    if (!moduleInfo) {
+      return evalScope;
+    }
+
+    for (const localName of moduleInfo.functionDeclarations.keys()) {
+      if (
+        localName === excludeName || !identifierMentioned(sourceHint, localName)
+      ) {
+        continue;
+      }
+      const localValue = resolveIdentifierInModule([localName], moduleId);
+      if (localValue !== null) {
+        evalScope[localName] = localValue;
+      }
+    }
+
+    for (const localName of moduleInfo.constInitializers.keys()) {
+      if (
+        localName === excludeName || !identifierMentioned(sourceHint, localName)
+      ) {
+        continue;
+      }
+      const localValue = resolveIdentifierInModule([localName], moduleId);
+      if (localValue !== null) {
+        evalScope[localName] = localValue;
+      }
+    }
+
+    for (const localName of moduleInfo.imports.keys()) {
+      if (!identifierMentioned(sourceHint, localName)) {
+        continue;
+      }
+      const localValue = resolveIdentifierInModule([localName], moduleId);
+      if (localValue !== null) {
+        evalScope[localName] = localValue;
+      }
+    }
+
+    return evalScope;
+  }
+
+  function resolveIdentifierInModule(
+    identifierPath: readonly string[],
+    moduleId: string,
+  ): unknown | null {
+    if (identifierPath.length === 0) {
+      return null;
+    }
+
+    const extraValue = options.resolveExtra?.(identifierPath, moduleId) ?? null;
+    if (extraValue !== null) {
+      return extraValue;
+    }
+
+    const cacheKey = `${moduleId}::${identifierPath.join(".")}`;
+    if (constValueCache.has(cacheKey)) {
+      return constValueCache.get(cacheKey) ?? null;
+    }
+    if (resolving.has(cacheKey)) {
+      return null;
+    }
+
+    resolving.add(cacheKey);
+    let resolved: unknown | null = null;
+    const [head, ...tail] = identifierPath;
+
+    const moduleInfo = getModuleInfo(moduleId);
+    if (moduleInfo) {
+      const initializerInfo = moduleInfo.constInitializers.get(head);
+      if (initializerInfo !== undefined) {
+        const initializer = initializerInfo.initializer;
+        let value = parseStaticExpression(initializer, (nestedPath) => {
+          const nested = resolveIdentifierInModule(nestedPath, moduleId);
+          return nested === null ? undefined : nested;
+        }, { keepUnresolvedIdentifiers: true });
+
+        if (value === null) {
+          value = evaluateExpression(
+            initializer,
+            buildEvalScope(moduleId, head, initializer),
+          );
+        }
+
+        if (value !== null) {
+          resolved = tail.length > 0 ? readMemberPath(value, tail) : value;
+        }
+      } else {
+        const functionDeclaration = moduleInfo.functionDeclarations.get(head);
+        if (functionDeclaration !== undefined) {
+          const functionValue = evaluateFunctionDeclaration(
+            functionDeclaration,
+            buildEvalScope(moduleId, head, functionDeclaration),
+          );
+          if (functionValue !== null) {
+            resolved = tail.length > 0
+              ? readMemberPath(functionValue, tail)
+              : functionValue;
+          }
+        }
+      }
+
+      if (resolved === null) {
+        const binding = moduleInfo.imports.get(head);
+        if (binding) {
+          resolved = options.resolveRuntimeImport(binding, tail);
+          if (resolved === null) {
+            const resolvedImportFile = options.resolveImportFile(
+              moduleId,
+              binding.source,
+            );
+            resolved = options.resolveAssetImport(
+              binding,
+              tail,
+              moduleId,
+              resolvedImportFile,
+            );
+            if (resolved === null && resolvedImportFile) {
+              const importedModuleInfo = getModuleInfo(resolvedImportFile);
+              if (importedModuleInfo) {
+                if (binding.kind === "namespace") {
+                  if (tail.length > 0) {
+                    const [namespaceExport, ...namespaceTail] = tail;
+                    const exportedLocalName =
+                      importedModuleInfo.exportedConsts.get(namespaceExport) ??
+                        namespaceExport;
+                    const namespaceValue = resolveIdentifierInModule(
+                      [exportedLocalName],
+                      resolvedImportFile,
+                    );
+                    resolved = namespaceTail.length > 0
+                      ? readMemberPath(namespaceValue, namespaceTail)
+                      : namespaceValue;
+                  }
+                } else {
+                  const importedName = binding.kind === "default"
+                    ? "default"
+                    : binding.imported;
+                  const exportedLocalName = importedName === "default"
+                    ? null
+                    : (importedModuleInfo.exportedConsts.get(importedName) ??
+                      importedName);
+                  const importedValue = resolveIdentifierInModule(
+                    exportedLocalName ? [exportedLocalName] : ["default"],
+                    resolvedImportFile,
+                  );
+                  resolved = tail.length > 0
+                    ? readMemberPath(importedValue, tail)
+                    : importedValue;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (
+        resolved === null && head === "default" &&
+        moduleInfo.defaultExportExpression
+      ) {
+        const parsedDefault = parseStaticExpression(
+          moduleInfo.defaultExportExpression,
+          (nestedPath) =>
+            resolveIdentifierInModule(nestedPath, moduleId) ?? undefined,
+        );
+        if (parsedDefault !== null) {
+          resolved = tail.length > 0
+            ? readMemberPath(parsedDefault, tail)
+            : parsedDefault;
+        } else {
+          const evaluatedDefault = evaluateExpression(
+            moduleInfo.defaultExportExpression,
+            buildEvalScope(
+              moduleId,
+              undefined,
+              moduleInfo.defaultExportExpression,
+            ),
+          );
+          if (evaluatedDefault !== null) {
+            resolved = tail.length > 0
+              ? readMemberPath(evaluatedDefault, tail)
+              : evaluatedDefault;
+          }
+        }
+      }
+    }
+
+    resolving.delete(cacheKey);
+    if (resolved !== null) {
+      constValueCache.set(cacheKey, resolved);
+    } else {
+      constValueCache.delete(cacheKey);
+    }
+    return resolved;
+  }
+
+  return {
+    getModuleInfo,
+    resolveIdentifierInModule,
+    buildEvalScope,
+  };
+}
+
+function stripUnusedStaticHelperConsts(code: string, id: string): string {
+  const moduleInfo = parseStaticModuleInfo(code, id);
   const removals: Array<{ start: number; end: number }> = [];
 
   for (const [name, info] of moduleInfo.constInitializers) {
@@ -1774,261 +1849,47 @@ function loadInkConfig(
     sideEffectImports.push(`"${match[1]}"`);
   }
 
-  const moduleInfoCache = new Map<string, ModuleStaticInfo>();
-  const constValueCache = new Map<string, unknown | null>();
-  const resolving = new Set<string>();
-
-  function getModuleCode(moduleId: string): string | null {
-    if (moduleId === configPath) {
-      return source;
-    }
-    try {
-      dependencies.add(cleanId(moduleId));
-      return getNodeFs().readFileSync(moduleId, "utf8");
-    } catch {
-      return null;
-    }
-  }
-
-  function getModuleInfo(moduleId: string): ModuleStaticInfo | null {
-    const cached = moduleInfoCache.get(moduleId);
-    if (cached) {
-      return cached;
-    }
-    const moduleCode = getModuleCode(moduleId);
-    if (!moduleCode) {
-      return null;
-    }
-    const parsed = parseModuleStaticInfo(moduleCode);
-    moduleInfoCache.set(moduleId, parsed);
-    return parsed;
-  }
-
-  function buildEvalScope(
-    moduleInfo: ModuleStaticInfo,
-    moduleId: string,
-    excludeName?: string,
-    sourceHint?: string,
-  ): Record<string, unknown> {
-    const evalScope: Record<string, unknown> = {
-      ...STATIC_EVAL_GLOBALS,
-    };
-
-    for (const localName of moduleInfo.functionDeclarations.keys()) {
-      if (
-        localName === excludeName || !identifierMentioned(sourceHint, localName)
-      ) {
-        continue;
+  const staticResolver = createStaticModuleResolver({
+    loadModuleCode(moduleId) {
+      if (moduleId === configPath) {
+        return source;
       }
-      const localValue = resolveIdentifierInModule([localName], moduleId);
-      if (localValue !== null) {
-        evalScope[localName] = localValue;
+      try {
+        dependencies.add(cleanId(moduleId));
+        return getNodeFs().readFileSync(moduleId, "utf8");
+      } catch {
+        return null;
       }
-    }
+    },
+    resolveImportFile: (moduleId, importSource) =>
+      resolveImportToFile(moduleId, importSource, resolverOptions),
+    resolveRuntimeImport: resolveStaticInkImport,
+    resolveAssetImport: (binding, tail, moduleId, resolvedImportFile) =>
+      resolveStaticImageImport(
+        binding,
+        tail,
+        moduleId,
+        resolvedImportFile,
+        resolverOptions,
+      ),
+  });
 
-    for (const localName of moduleInfo.constInitializers.keys()) {
-      if (
-        localName === excludeName || !identifierMentioned(sourceHint, localName)
-      ) {
-        continue;
-      }
-      const localValue = resolveIdentifierInModule([localName], moduleId);
-      if (localValue !== null) {
-        evalScope[localName] = localValue;
-      }
-    }
-
-    for (const localName of moduleInfo.imports.keys()) {
-      if (!identifierMentioned(sourceHint, localName)) {
-        continue;
-      }
-      const localValue = resolveIdentifierInModule([localName], moduleId);
-      if (localValue !== null) {
-        evalScope[localName] = localValue;
-      }
-    }
-
-    return evalScope;
-  }
-
-  function resolveIdentifierInModule(
-    identifierPath: readonly string[],
-    moduleId: string,
-  ): unknown | null {
-    if (identifierPath.length === 0) {
-      return null;
-    }
-
-    const cacheKey = `${moduleId}::${identifierPath.join(".")}`;
-    if (constValueCache.has(cacheKey)) {
-      return constValueCache.get(cacheKey) ?? null;
-    }
-    if (resolving.has(cacheKey)) {
-      return null;
-    }
-
-    resolving.add(cacheKey);
-    let resolved: unknown | null = null;
-    const [head, ...tail] = identifierPath;
-
-    const moduleInfo = getModuleInfo(moduleId);
-    if (moduleInfo) {
-      const initializerInfo = moduleInfo.constInitializers.get(head);
-      if (initializerInfo !== undefined) {
-        const initializer = initializerInfo.initializer;
-        let value = parseStaticExpression(initializer, (nestedPath) => {
-          const nested = resolveIdentifierInModule(nestedPath, moduleId);
-          return nested === null ? undefined : nested;
-        }, { keepUnresolvedIdentifiers: true });
-
-        if (value === null) {
-          value = evaluateExpression(
-            initializer,
-            buildEvalScope(moduleInfo, moduleId, head, initializer),
-          );
-        }
-
-        if (value !== null) {
-          resolved = tail.length > 0 ? readMemberPath(value, tail) : value;
-        }
-      } else {
-        const functionDeclaration = moduleInfo.functionDeclarations.get(head);
-        if (functionDeclaration !== undefined) {
-          const functionValue = evaluateFunctionDeclaration(
-            functionDeclaration,
-            buildEvalScope(moduleInfo, moduleId, head, functionDeclaration),
-          );
-          if (functionValue !== null) {
-            resolved = tail.length > 0
-              ? readMemberPath(functionValue, tail)
-              : functionValue;
-          }
-        }
-      }
-
-      if (resolved === null) {
-        const binding = moduleInfo.imports.get(head);
-        if (binding) {
-          resolved = resolveStaticInkImport(binding, tail);
-          if (resolved === null) {
-            const resolvedImportFile = resolveImportToFile(
-              moduleId,
-              binding.source,
-              {
-                projectRoot: resolverOptions.projectRoot,
-                viteRoot: resolverOptions.viteRoot,
-                viteAliases: resolverOptions.viteAliases,
-                tsconfigResolver: resolverOptions.tsconfigResolver,
-              },
-            );
-            resolved = resolveStaticImageImport(
-              binding,
-              tail,
-              moduleId,
-              resolvedImportFile,
-              {
-                projectRoot: resolverOptions.projectRoot,
-                viteRoot: resolverOptions.viteRoot,
-                viteAliases: resolverOptions.viteAliases,
-                tsconfigResolver: resolverOptions.tsconfigResolver,
-              },
-            );
-            if (resolved === null && resolvedImportFile) {
-              const importedModuleInfo = getModuleInfo(resolvedImportFile);
-              if (importedModuleInfo) {
-                if (binding.kind === "namespace") {
-                  if (tail.length > 0) {
-                    const [namespaceExport, ...namespaceTail] = tail;
-                    const exportedLocalName =
-                      importedModuleInfo.exportedConsts.get(namespaceExport) ??
-                        namespaceExport;
-                    const namespaceValue = resolveIdentifierInModule(
-                      [exportedLocalName],
-                      resolvedImportFile,
-                    );
-                    resolved = namespaceTail.length > 0
-                      ? readMemberPath(namespaceValue, namespaceTail)
-                      : namespaceValue;
-                  }
-                } else {
-                  const importedName = binding.kind === "default"
-                    ? "default"
-                    : binding.imported;
-                  const exportedLocalName = importedName === "default"
-                    ? null
-                    : (importedModuleInfo.exportedConsts.get(importedName) ??
-                      importedName);
-                  const importedValue = resolveIdentifierInModule(
-                    exportedLocalName ? [exportedLocalName] : ["default"],
-                    resolvedImportFile,
-                  );
-                  resolved = tail.length > 0
-                    ? readMemberPath(importedValue, tail)
-                    : importedValue;
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (
-        resolved === null && head === "default" &&
-        moduleInfo.defaultExportExpression
-      ) {
-        const parsedDefault = parseStaticExpression(
-          moduleInfo.defaultExportExpression,
-          (nestedPath) =>
-            resolveIdentifierInModule(nestedPath, moduleId) ?? undefined,
-        );
-        if (parsedDefault !== null) {
-          resolved = tail.length > 0
-            ? readMemberPath(parsedDefault, tail)
-            : parsedDefault;
-        } else {
-          const evaluatedDefault = evaluateExpression(
-            moduleInfo.defaultExportExpression,
-            buildEvalScope(
-              moduleInfo,
-              moduleId,
-              undefined,
-              moduleInfo.defaultExportExpression,
-            ),
-          );
-          if (evaluatedDefault !== null) {
-            resolved = tail.length > 0
-              ? readMemberPath(evaluatedDefault, tail)
-              : evaluatedDefault;
-          }
-        }
-      }
-    }
-
-    resolving.delete(cacheKey);
-    if (resolved !== null) {
-      constValueCache.set(cacheKey, resolved);
-    } else {
-      constValueCache.delete(cacheKey);
-    }
-    return resolved;
-  }
-
-  const configModuleInfo = getModuleInfo(configPath);
-  const defaultExpr = configModuleInfo?.defaultExportExpression ??
-    extractDefaultExportExpression(source);
+  const configModuleInfo = staticResolver.getModuleInfo(configPath);
+  const defaultExpr = configModuleInfo?.defaultExportExpression ?? null;
   let configObject: Record<string, unknown> = {};
 
   if (defaultExpr) {
     const parsed = parseStaticExpression(
       defaultExpr,
       (identifierPath) =>
-        resolveIdentifierInModule(identifierPath, configPath) ?? undefined,
+        staticResolver.resolveIdentifierInModule(identifierPath, configPath) ??
+          undefined,
     );
     if (isRecord(parsed)) {
       configObject = parsed;
     } else if (configModuleInfo) {
       const evalScope: Record<string, unknown> = {
-        ...buildEvalScope(configModuleInfo, configPath, undefined, defaultExpr),
+        ...staticResolver.buildEvalScope(configPath, undefined, defaultExpr),
         defineCssConfig: (input: unknown) => input,
       };
       const evaluated = evaluateExpression(defaultExpr, evalScope);
@@ -2195,537 +2056,6 @@ function getTsTranspiler(): ((source: string) => string) | null {
       },
     }).outputText;
   return tsTranspiler;
-}
-
-const CT_BUILDER_ASSIGNMENT_PROPERTIES = new Set([
-  "base",
-  "global",
-  "themes",
-  "fonts",
-  "root",
-  "rootVars",
-  "variant",
-  "defaults",
-  "tailwind",
-  "tailwindCss",
-  "modules",
-]);
-
-type AstScopeEntry = AstNewInkDeclaration | null;
-
-function scriptKindForModule(
-  typescript: TypeScriptAstApi,
-  moduleId: string,
-): number {
-  if (moduleId.endsWith(".tsx")) {
-    return typescript.ScriptKind.TSX;
-  }
-  if (moduleId.endsWith(".jsx")) {
-    return typescript.ScriptKind.JSX;
-  }
-  if (
-    moduleId.endsWith(".ts") ||
-    moduleId.endsWith(".mts") ||
-    moduleId.endsWith(".cts")
-  ) {
-    return typescript.ScriptKind.TS;
-  }
-  return typescript.ScriptKind.JS;
-}
-
-function astNodeStart(node: unknown, sourceFile: unknown): number {
-  if (
-    node &&
-    typeof node === "object" &&
-    "getStart" in (node as Record<string, unknown>) &&
-    typeof (node as { getStart?: unknown }).getStart === "function"
-  ) {
-    return (node as { getStart: (sourceFile?: unknown) => number }).getStart(
-      sourceFile,
-    );
-  }
-
-  return (node as { pos?: number } | null)?.pos ?? 0;
-}
-
-function astNodeEnd(node: unknown): number {
-  return (node as { end?: number } | null)?.end ?? 0;
-}
-
-function astNodeText(
-  node: unknown,
-  code: string,
-  sourceFile: unknown,
-): string {
-  return code.slice(astNodeStart(node, sourceFile), astNodeEnd(node));
-}
-
-function astIdentifierText(node: unknown): string | null {
-  if (!node || typeof node !== "object") {
-    return null;
-  }
-
-  const textValue = (node as { text?: unknown }).text;
-  if (typeof textValue === "string") {
-    return textValue;
-  }
-
-  const escapedText = (node as { escapedText?: unknown }).escapedText;
-  if (typeof escapedText === "string") {
-    return escapedText;
-  }
-
-  return null;
-}
-
-function isInkIdentifier(node: unknown): boolean {
-  return astIdentifierText(node) === "ink";
-}
-
-function isInkObjectCall(
-  node: unknown,
-  typescript: TypeScriptAstApi,
-): node is { expression: unknown; arguments: unknown[]; end: number } {
-  const syntaxKind = typescript.SyntaxKind;
-  if (
-    !node || typeof node !== "object" ||
-    (node as { kind?: number }).kind !== syntaxKind.CallExpression
-  ) {
-    return false;
-  }
-
-  const call = node as { expression?: unknown; arguments?: unknown[] };
-  return Boolean(
-    isInkIdentifier(call.expression) &&
-      Array.isArray(call.arguments) &&
-      call.arguments.length > 0 &&
-      (call.arguments[0] as { kind?: number } | undefined)?.kind ===
-        syntaxKind.ObjectLiteralExpression,
-  );
-}
-
-function isNewInkBuilder(
-  node: unknown,
-  typescript: TypeScriptAstApi,
-): node is { expression: unknown; arguments?: unknown[]; end: number } {
-  const syntaxKind = typescript.SyntaxKind;
-  if (
-    !node || typeof node !== "object" ||
-    (node as { kind?: number }).kind !== syntaxKind.NewExpression
-  ) {
-    return false;
-  }
-
-  const expression = (node as { expression?: unknown }).expression;
-  const args = (node as { arguments?: unknown[] }).arguments;
-  return isInkIdentifier(expression) && (args?.length ?? 0) <= 1;
-}
-
-function addScopeBinding(
-  nameNode: unknown,
-  scope: Map<string, AstScopeEntry>,
-): void {
-  const name = astIdentifierText(nameNode);
-  if (name) {
-    scope.set(name, null);
-  }
-}
-
-function addBindingPattern(
-  nameNode: unknown,
-  scope: Map<string, AstScopeEntry>,
-  typescript: TypeScriptAstApi,
-): void {
-  if (!nameNode || typeof nameNode !== "object") {
-    return;
-  }
-
-  const syntaxKind = typescript.SyntaxKind;
-  const node = nameNode as Record<string, unknown>;
-  if (node.kind === syntaxKind.Identifier) {
-    addScopeBinding(node, scope);
-    return;
-  }
-
-  if (node.kind === syntaxKind.ObjectBindingPattern) {
-    const elements = node.elements;
-    if (Array.isArray(elements)) {
-      for (const element of elements) {
-        addBindingPattern(
-          (element as { name?: unknown } | null)?.name,
-          scope,
-          typescript,
-        );
-      }
-    }
-    return;
-  }
-
-  if (node.kind === syntaxKind.ArrayBindingPattern) {
-    const elements = node.elements;
-    if (Array.isArray(elements)) {
-      for (const element of elements) {
-        addBindingPattern(
-          (element as { name?: unknown } | null)?.name,
-          scope,
-          typescript,
-        );
-      }
-    }
-  }
-}
-
-function resolveBuilderDeclaration(
-  scopes: readonly Map<string, AstScopeEntry>[],
-  name: string,
-): AstNewInkDeclaration | null {
-  for (let index = scopes.length - 1; index >= 0; index -= 1) {
-    const scope = scopes[index];
-    if (!scope.has(name)) {
-      continue;
-    }
-    return scope.get(name) ?? null;
-  }
-
-  return null;
-}
-
-function collectAstTransformTargets(
-  code: string,
-  id: string,
-): AstTransformTargets | null {
-  const typescript = getTypeScriptAstApi();
-  if (!typescript) {
-    return null;
-  }
-
-  const ast = typescript;
-  const normalizedId = cleanId(id);
-  const sourceFile = ast.createSourceFile(
-    normalizedId,
-    code,
-    ast.ScriptTarget.ES2020,
-    true,
-    scriptKindForModule(ast, normalizedId),
-  ) as Record<string, unknown>;
-  const syntaxKind = ast.SyntaxKind;
-  const calls: AstInkCall[] = [];
-  const newInkDecls: AstNewInkDeclaration[] = [];
-
-  function recordInkCall(node: unknown): void {
-    if (isInkObjectCall(node, ast)) {
-      calls.push({
-        start: astNodeStart(node, sourceFile),
-        end: astNodeEnd(node),
-        arg: astNodeText(node.arguments[0], code, sourceFile),
-      });
-    }
-  }
-
-  function registerVariableDeclaration(
-    declaration: unknown,
-    scope: Map<string, AstScopeEntry>,
-  ): void {
-    if (!declaration || typeof declaration !== "object") {
-      return;
-    }
-
-    const declarationNode = declaration as {
-      name?: unknown;
-      initializer?: unknown;
-    };
-    const name = astIdentifierText(declarationNode.name);
-    if (!name) {
-      addBindingPattern(declarationNode.name, scope, ast);
-      return;
-    }
-
-    if (isNewInkBuilder(declarationNode.initializer, ast)) {
-      const initializerArgs = declarationNode.initializer.arguments ?? [];
-      const optionsSource = initializerArgs.length > 0
-        ? astNodeText(initializerArgs[0], code, sourceFile)
-        : undefined;
-      const parsedBuilderOptions = parseInkBuilderOptions(
-        optionsSource ? parseStaticExpression(optionsSource) : undefined,
-      ) ?? { simple: false };
-      const builder: AstNewInkDeclaration = {
-        varName: name,
-        start: astNodeStart(declaration, sourceFile),
-        initializerStart: astNodeStart(declarationNode.initializer, sourceFile),
-        initializerEnd: astNodeEnd(declarationNode.initializer),
-        optionsSource,
-        hasStaticOptions: !optionsSource ||
-          parseStaticExpression(optionsSource) !== null,
-        simple: parsedBuilderOptions.simple,
-        hasAddContainerCall: false,
-        assignments: [],
-      };
-      newInkDecls.push(builder);
-      scope.set(name, builder);
-      return;
-    }
-
-    scope.set(name, null);
-  }
-
-  function recordBuilderMutation(
-    statement: unknown,
-    scopes: readonly Map<string, AstScopeEntry>[],
-  ): void {
-    if (!statement || typeof statement !== "object") {
-      return;
-    }
-
-    const expression = (statement as { expression?: unknown }).expression;
-    if (!expression || typeof expression !== "object") {
-      return;
-    }
-
-    if (
-      (expression as { kind?: number }).kind === syntaxKind.BinaryExpression
-    ) {
-      const binary = expression as {
-        left?: unknown;
-        right?: unknown;
-        operatorToken?: { kind?: number };
-      };
-      if (binary.operatorToken?.kind !== syntaxKind.EqualsToken) {
-        return;
-      }
-
-      const left = binary.left as {
-        kind?: number;
-        expression?: unknown;
-        name?: unknown;
-      } | null;
-      if (!left || left.kind !== syntaxKind.PropertyAccessExpression) {
-        return;
-      }
-
-      const varName = astIdentifierText(left.expression);
-      const property = astIdentifierText(left.name);
-      if (
-        !varName || !property ||
-        !CT_BUILDER_ASSIGNMENT_PROPERTIES.has(property)
-      ) {
-        return;
-      }
-
-      const builder = resolveBuilderDeclaration(scopes, varName);
-      if (!builder || !binary.right) {
-        return;
-      }
-
-      builder.assignments.push({
-        property,
-        start: astNodeStart(statement, sourceFile),
-        end: astNodeEnd(statement),
-        valueSource: astNodeText(binary.right, code, sourceFile),
-      });
-      return;
-    }
-
-    if ((expression as { kind?: number }).kind !== syntaxKind.CallExpression) {
-      return;
-    }
-
-    const call = expression as {
-      expression?: unknown;
-      arguments?: unknown[];
-    };
-    const access = call.expression as {
-      kind?: number;
-      expression?: unknown;
-      name?: unknown;
-    } | null;
-    if (!access || access.kind !== syntaxKind.PropertyAccessExpression) {
-      return;
-    }
-
-    const methodName = astIdentifierText(access.name);
-    if (methodName !== "import" && methodName !== "importModule") {
-      if (methodName !== "addContainer") {
-        return;
-      }
-
-      const varName = astIdentifierText(access.expression);
-      const builder = varName
-        ? resolveBuilderDeclaration(scopes, varName)
-        : null;
-      if (builder) {
-        builder.hasAddContainerCall = true;
-      }
-      return;
-    }
-
-    const varName = astIdentifierText(access.expression);
-    const builder = varName ? resolveBuilderDeclaration(scopes, varName) : null;
-    if (
-      !builder || !Array.isArray(call.arguments) || call.arguments.length === 0
-    ) {
-      return;
-    }
-
-    const firstArg = call.arguments[0];
-    const lastArg = call.arguments[call.arguments.length - 1];
-    builder.assignments.push({
-      property: methodName,
-      start: astNodeStart(statement, sourceFile),
-      end: astNodeEnd(statement),
-      valueSource: code.slice(
-        astNodeStart(firstArg, sourceFile),
-        astNodeEnd(lastArg),
-      ),
-    });
-  }
-
-  function visitFunctionLike(node: unknown): void {
-    if (!node || typeof node !== "object") {
-      return;
-    }
-
-    const functionNode = node as {
-      name?: unknown;
-      parameters?: unknown[];
-      body?: unknown;
-    };
-    const scope = new Map<string, AstScopeEntry>();
-    addScopeBinding(functionNode.name, scope);
-    if (Array.isArray(functionNode.parameters)) {
-      for (const parameter of functionNode.parameters) {
-        addBindingPattern(
-          (parameter as { name?: unknown } | null)?.name,
-          scope,
-          ast,
-        );
-      }
-    }
-    visitScopedNode(functionNode.body, [scope]);
-  }
-
-  function visitStatementList(
-    statements: unknown[] | undefined,
-    parentScopes: readonly Map<string, AstScopeEntry>[],
-  ): void {
-    if (!Array.isArray(statements)) {
-      return;
-    }
-
-    const scope = new Map<string, AstScopeEntry>();
-    const scopes = [...parentScopes, scope];
-
-    for (const statement of statements) {
-      visitScopedNode(statement, scopes);
-    }
-  }
-
-  function visitScopedNode(
-    node: unknown,
-    scopes: readonly Map<string, AstScopeEntry>[],
-  ): void {
-    if (!node || typeof node !== "object") {
-      return;
-    }
-
-    recordInkCall(node);
-
-    const kind = (node as { kind?: number }).kind;
-    if (kind === syntaxKind.SourceFile) {
-      visitStatementList(
-        (node as { statements?: unknown[] }).statements,
-        [],
-      );
-      return;
-    }
-
-    if (
-      kind === syntaxKind.FunctionDeclaration ||
-      kind === syntaxKind.FunctionExpression ||
-      kind === syntaxKind.ArrowFunction ||
-      kind === syntaxKind.MethodDeclaration ||
-      kind === syntaxKind.GetAccessor ||
-      kind === syntaxKind.SetAccessor ||
-      kind === syntaxKind.Constructor
-    ) {
-      if (kind === syntaxKind.FunctionDeclaration && scopes.length > 0) {
-        addScopeBinding(
-          (node as { name?: unknown }).name,
-          scopes[scopes.length - 1],
-        );
-      }
-      visitFunctionLike(node);
-      return;
-    }
-
-    if (
-      kind === syntaxKind.Block ||
-      kind === syntaxKind.ModuleBlock ||
-      kind === syntaxKind.CaseClause ||
-      kind === syntaxKind.DefaultClause
-    ) {
-      visitStatementList(
-        (node as { statements?: unknown[] }).statements,
-        scopes,
-      );
-      return;
-    }
-
-    if (kind === syntaxKind.CatchClause) {
-      const scope = new Map<string, AstScopeEntry>();
-      addBindingPattern(
-        (node as { variableDeclaration?: { name?: unknown } })
-          .variableDeclaration
-          ?.name,
-        scope,
-        ast,
-      );
-      visitScopedNode((node as { block?: unknown }).block, [...scopes, scope]);
-      return;
-    }
-
-    if (kind === syntaxKind.ClassDeclaration && scopes.length > 0) {
-      addScopeBinding(
-        (node as { name?: unknown }).name,
-        scopes[scopes.length - 1],
-      );
-    }
-
-    if (kind === syntaxKind.VariableStatement && scopes.length > 0) {
-      const declarations =
-        (node as { declarationList?: { declarations?: unknown[] } })
-          .declarationList?.declarations;
-      if (Array.isArray(declarations)) {
-        for (const declaration of declarations) {
-          registerVariableDeclaration(declaration, scopes[scopes.length - 1]);
-        }
-      }
-    }
-
-    if (kind === syntaxKind.ExpressionStatement) {
-      recordBuilderMutation(node, scopes);
-    }
-
-    ast.forEachChild(node, (child) => visitScopedNode(child, scopes));
-  }
-
-  visitScopedNode(sourceFile, []);
-
-  const builderRanges = newInkDecls.flatMap((decl) => [
-    { start: decl.initializerStart, end: decl.initializerEnd },
-    ...decl.assignments.map((assignment) => ({
-      start: assignment.start,
-      end: assignment.end,
-    })),
-  ]);
-
-  return {
-    calls: calls.filter((call) =>
-      !builderRanges.some((range) =>
-        call.start >= range.start && call.end <= range.end
-      )
-    ),
-    newInkDecls,
-  };
 }
 
 function splitTopLevelSegments(
@@ -4241,37 +3571,17 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       const isSvelte = normalizedId.endsWith(".svelte");
       const isAstro = normalizedId.endsWith(".astro");
       let nextCode = code;
-
-      if (!isSvelte && !isAstro && !hasInkImport(code)) {
-        return null;
-      }
-
-      const astTargets = !isSvelte && !isAstro
-        ? collectAstTransformTargets(nextCode, normalizedId)
-        : null;
-      const newInkDecls: AstNewInkDeclaration[] = astTargets?.newInkDecls ??
-        findNewInkDeclarations(nextCode).map((decl) => {
-          return {
-            varName: decl.varName,
-            start: decl.start,
-            initializerStart: decl.initializerStart,
-            initializerEnd: decl.initializerEnd,
-            optionsSource: decl.optionsSource,
-            hasStaticOptions: decl.hasStaticOptions,
-            simple: decl.simple,
-            hasAddContainerCall: new RegExp(
-              `\\b${decl.varName}\\.addContainer\\s*\\(`,
-            ).test(nextCode),
-            assignments: decl.assignments,
-          };
-        });
-      const calls = astTargets?.calls ??
-        findInkCalls(nextCode).filter((call) =>
-          !newInkDecls.some((decl) =>
-            call.start >= decl.initializerStart &&
-            call.end <= decl.initializerEnd
-          )
-        );
+      const sourceRegions = extractTransformSourceRegions(
+        code,
+        normalizedId,
+        { isSvelte, isAstro, projectRoot, viteRoot },
+      );
+      const currentStaticModuleCode = mergeSourceRegions(sourceRegions);
+      const astTargets = collectTransformTargetsFromRegions(sourceRegions);
+      const transformTargets = astTargets ??
+        collectLegacyTransformTargetsFromRegions(sourceRegions);
+      const newInkDecls: AstNewInkDeclaration[] = transformTargets.newInkDecls;
+      const calls = transformTargets.calls;
       if (calls.length === 0 && newInkDecls.length === 0) {
         if (!isSvelte && !isAstro) {
           return null;
@@ -4315,10 +3625,55 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       const runtimeOptionsLiteral = JSON.stringify(runtimeOptionsForRuntime);
       const shouldLogStatic = Boolean(server && inkConfig.debug.logStatic);
       const moduleInfoCache = new Map<string, ModuleStaticInfo>();
-      const constValueCache = new Map<string, unknown | null>();
-      const resolving = new Set<string>();
       const staticDependencies = new Set<string>();
       const cssModuleMappings = new Map<string, Record<string, string>>();
+      const importResolverOptions = {
+        projectRoot,
+        viteRoot,
+        viteAliases,
+        tsconfigResolver,
+      };
+      const staticResolver = createStaticModuleResolver({
+        moduleInfoCache,
+        loadModuleCode(moduleId) {
+          if (moduleId === normalizedId) {
+            return currentStaticModuleCode;
+          }
+          try {
+            staticDependencies.add(cleanId(moduleId));
+            return getNodeFs().readFileSync(moduleId, "utf8");
+          } catch {
+            return null;
+          }
+        },
+        resolveImportFile: (moduleId, importSource) =>
+          resolveImportToFile(moduleId, importSource, importResolverOptions),
+        resolveRuntimeImport: resolveStaticInkImport,
+        resolveAssetImport: (binding, tail, moduleId, resolvedImportFile) =>
+          resolveStaticImageImport(
+            binding,
+            tail,
+            moduleId,
+            resolvedImportFile,
+            importResolverOptions,
+          ),
+        resolveExtra(identifierPath, moduleId) {
+          if (moduleId !== normalizedId || identifierPath.length === 0) {
+            return null;
+          }
+          const head = identifierPath[0];
+          if (!cssModuleMappings.has(head)) {
+            return null;
+          }
+          const mapping = cssModuleMappings.get(head)!;
+          return identifierPath.length > 1
+            ? readMemberPath(mapping, identifierPath.slice(1))
+            : mapping;
+        },
+      });
+      const getModuleInfo = staticResolver.getModuleInfo;
+      const resolveIdentifierInModule =
+        staticResolver.resolveIdentifierInModule;
 
       const runSync = () => {
         function lineAt(index: number): number {
@@ -4345,282 +3700,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         }
 
         function withRuntimeOptionsInNewInkInitializer(
+          constructorSource: string,
           optionsSource?: string,
         ): string {
-          return `new ink(${
+          return `new ${constructorSource}(${
             optionsSource ?? "undefined"
           }, undefined, ${runtimeOptionsLiteral})`;
-        }
-
-        function readMemberPath(
-          value: unknown,
-          members: readonly string[],
-        ): unknown | null {
-          let current: unknown = value;
-          for (const member of members) {
-            if (
-              typeof current !== "object" || current === null ||
-              Array.isArray(current)
-            ) {
-              return null;
-            }
-            const record = current as Record<string, unknown>;
-            if (!(member in record)) {
-              return null;
-            }
-            current = record[member];
-          }
-          return current;
-        }
-
-        function getModuleCode(moduleId: string): string | null {
-          if (moduleId === normalizedId) {
-            return code;
-          }
-          try {
-            staticDependencies.add(cleanId(moduleId));
-            return getNodeFs().readFileSync(moduleId, "utf8");
-          } catch {
-            return null;
-          }
-        }
-
-        function getModuleInfo(moduleId: string): ModuleStaticInfo | null {
-          const cached = moduleInfoCache.get(moduleId);
-          if (cached) {
-            return cached;
-          }
-          const moduleCode = getModuleCode(moduleId);
-          if (!moduleCode) {
-            return null;
-          }
-          const parsed = parseModuleStaticInfo(moduleCode);
-          moduleInfoCache.set(moduleId, parsed);
-          return parsed;
-        }
-
-        function resolveIdentifierInModule(
-          identifierPath: readonly string[],
-          moduleId: string,
-        ): unknown | null {
-          if (identifierPath.length === 0) {
-            return null;
-          }
-
-          if (moduleId === normalizedId && identifierPath.length > 0) {
-            const head = identifierPath[0];
-            if (cssModuleMappings.has(head)) {
-              const mapping = cssModuleMappings.get(head)!;
-              return identifierPath.length > 1
-                ? readMemberPath(mapping, identifierPath.slice(1))
-                : mapping;
-            }
-          }
-
-          const cacheKey = `${moduleId}::${identifierPath.join(".")}`;
-          if (constValueCache.has(cacheKey)) {
-            return constValueCache.get(cacheKey) ?? null;
-          }
-          if (resolving.has(cacheKey)) {
-            return null;
-          }
-
-          resolving.add(cacheKey);
-          let resolved: unknown | null = null;
-          const [head, ...tail] = identifierPath;
-
-          const moduleInfo = getModuleInfo(moduleId);
-          if (moduleInfo) {
-            const buildEvalScope = (
-              excludeName?: string,
-              sourceHint?: string,
-            ): Record<string, unknown> => {
-              const evalScope: Record<string, unknown> = {
-                ...STATIC_EVAL_GLOBALS,
-              };
-              for (const localName of moduleInfo.functionDeclarations.keys()) {
-                if (
-                  localName === excludeName ||
-                  !identifierMentioned(sourceHint, localName)
-                ) {
-                  continue;
-                }
-                const localValue = resolveIdentifierInModule(
-                  [localName],
-                  moduleId,
-                );
-                if (localValue !== null) {
-                  evalScope[localName] = localValue;
-                }
-              }
-              for (const localName of moduleInfo.constInitializers.keys()) {
-                if (
-                  localName === excludeName ||
-                  !identifierMentioned(sourceHint, localName)
-                ) {
-                  continue;
-                }
-                const localValue = resolveIdentifierInModule(
-                  [localName],
-                  moduleId,
-                );
-                if (localValue !== null) {
-                  evalScope[localName] = localValue;
-                }
-              }
-              for (const localName of moduleInfo.imports.keys()) {
-                if (!identifierMentioned(sourceHint, localName)) {
-                  continue;
-                }
-                const localValue = resolveIdentifierInModule(
-                  [localName],
-                  moduleId,
-                );
-                if (localValue !== null) {
-                  evalScope[localName] = localValue;
-                }
-              }
-              return evalScope;
-            };
-
-            const initializerInfo = moduleInfo.constInitializers.get(head);
-            if (initializerInfo !== undefined) {
-              const initializer = initializerInfo.initializer;
-              let value = parseStaticExpression(initializer, (nestedPath) => {
-                const nested = resolveIdentifierInModule(nestedPath, moduleId);
-                return nested === null ? undefined : nested;
-              }, { keepUnresolvedIdentifiers: true });
-
-              if (value === null) {
-                value = evaluateExpression(
-                  initializer,
-                  buildEvalScope(head, initializer),
-                );
-              }
-
-              if (value !== null) {
-                resolved = tail.length > 0 ? readMemberPath(value, tail) : value;
-              }
-            } else {
-              const functionDeclaration = moduleInfo.functionDeclarations.get(
-                head,
-              );
-              if (functionDeclaration !== undefined) {
-                const functionValue = evaluateFunctionDeclaration(
-                  functionDeclaration,
-                  buildEvalScope(head, functionDeclaration),
-                );
-                if (functionValue !== null) {
-                  resolved = tail.length > 0
-                    ? readMemberPath(functionValue, tail)
-                    : functionValue;
-                }
-              }
-            }
-
-            if (resolved === null) {
-              const binding = moduleInfo.imports.get(head);
-              if (binding) {
-                resolved = resolveStaticInkImport(binding, tail);
-                if (resolved === null) {
-                  const resolvedImportFile = resolveImportToFile(
-                    moduleId,
-                    binding.source,
-                    {
-                      projectRoot,
-                      viteRoot,
-                      viteAliases,
-                      tsconfigResolver,
-                    },
-                  );
-                  resolved = resolveStaticImageImport(
-                    binding,
-                    tail,
-                    moduleId,
-                    resolvedImportFile,
-                    {
-                      projectRoot,
-                      viteRoot,
-                      viteAliases,
-                      tsconfigResolver,
-                    },
-                  );
-                  if (resolved === null && resolvedImportFile) {
-                    const importedModuleInfo = getModuleInfo(resolvedImportFile);
-                    if (importedModuleInfo) {
-                      if (binding.kind === "namespace") {
-                        if (tail.length > 0) {
-                          const [namespaceExport, ...namespaceTail] = tail;
-                          const exportedLocalName =
-                            importedModuleInfo.exportedConsts.get(
-                              namespaceExport,
-                            ) ?? namespaceExport;
-                          const namespaceValue = resolveIdentifierInModule(
-                            [exportedLocalName],
-                            resolvedImportFile,
-                          );
-                          resolved = namespaceTail.length > 0
-                            ? readMemberPath(namespaceValue, namespaceTail)
-                            : namespaceValue;
-                        }
-                      } else {
-                        const importedName = binding.kind === "default"
-                          ? "default"
-                          : binding.imported;
-                        const exportedLocalName = importedName === "default"
-                          ? null
-                          : (importedModuleInfo.exportedConsts.get(
-                            importedName,
-                          ) ??
-                            importedName);
-                        const importedValue = resolveIdentifierInModule(
-                          exportedLocalName ? [exportedLocalName] : ["default"],
-                          resolvedImportFile,
-                        );
-                        resolved = tail.length > 0
-                          ? readMemberPath(importedValue, tail)
-                          : importedValue;
-                      }
-                    }
-                  }
-                }
-              }
-            }
-
-            if (
-              resolved === null && head === "default" &&
-              moduleInfo.defaultExportExpression
-            ) {
-              const parsedDefault = parseStaticExpression(
-                moduleInfo.defaultExportExpression,
-                (nestedPath) =>
-                  resolveIdentifierInModule(nestedPath, moduleId) ?? undefined,
-              );
-              if (parsedDefault !== null) {
-                resolved = tail.length > 0
-                  ? readMemberPath(parsedDefault, tail)
-                  : parsedDefault;
-              } else {
-                const evaluatedDefault = evaluateExpression(
-                  moduleInfo.defaultExportExpression,
-                  buildEvalScope(undefined, moduleInfo.defaultExportExpression),
-                );
-                if (evaluatedDefault !== null) {
-                  resolved = tail.length > 0
-                    ? readMemberPath(evaluatedDefault, tail)
-                    : evaluatedDefault;
-                }
-              }
-            }
-          }
-
-          resolving.delete(cacheKey);
-          if (resolved !== null) {
-            constValueCache.set(cacheKey, resolved);
-          } else {
-            constValueCache.delete(cacheKey);
-          }
-          return resolved;
         }
 
         for (const call of calls) {
@@ -4628,7 +3713,8 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             replacements.push({
               start: call.start,
               end: call.end,
-              text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
+              text:
+                `${call.callee}(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
             });
             continue;
           }
@@ -4659,7 +3745,8 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             replacements.push({
               start: call.start,
               end: call.end,
-              text: `ink(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
+              text:
+                `${call.callee}(${call.arg}, undefined, ${runtimeOptionsLiteral})`,
             });
             continue;
           }
@@ -4722,11 +3809,15 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           }
 
           for (const [key, style] of Object.entries(parsed.base)) {
-            const generatedClassName = hasStyleDeclarations(style.declaration) ||
+            const generatedClassName =
+              hasStyleDeclarations(style.declaration) ||
                 !hasTailwindClassNames(style)
-              ? createClassName(key, style.declaration, normalizedId)
-              : undefined;
-            const classValue = resolveStyleClassValue(generatedClassName, style);
+                ? createClassName(key, style.declaration, normalizedId)
+                : undefined;
+            const classValue = resolveStyleClassValue(
+              generatedClassName,
+              style,
+            );
             classMap[key] = classValue;
             if (!generatedClassName) {
               continue;
@@ -4817,7 +3908,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           }
 
           const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-          const replacement = `ink(${runtimeConfigLiteral}, ${
+          const replacement = `${call.callee}(${runtimeConfigLiteral}, ${
             JSON.stringify(compiledConfig)
           }, ${runtimeOptionsLiteral})`;
           replacements.push({
@@ -4842,6 +3933,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             resolvedBuilderOptionsValue,
           ) ?? { simple: decl.simple };
           const runtimeDeclaration = withRuntimeOptionsInNewInkInitializer(
+            decl.constructorSource,
             decl.optionsSource,
           );
 
@@ -4898,49 +3990,14 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                     undefined,
               );
             if (value === null) {
-              const moduleInfo = getModuleInfo(normalizedId);
-              if (moduleInfo) {
-                const evalScope: Record<string, unknown> = {
-                  ...STATIC_EVAL_GLOBALS,
-                };
-                for (const localName of moduleInfo.functionDeclarations.keys()) {
-                  if (!identifierMentioned(assignment.valueSource, localName)) {
-                    continue;
-                  }
-                  const localValue = resolveIdentifierInModule(
-                    [localName],
-                    normalizedId,
-                  );
-                  if (localValue !== null) {
-                    evalScope[localName] = localValue;
-                  }
-                }
-                for (const localName of moduleInfo.constInitializers.keys()) {
-                  if (!identifierMentioned(assignment.valueSource, localName)) {
-                    continue;
-                  }
-                  const localValue = resolveIdentifierInModule(
-                    [localName],
-                    normalizedId,
-                  );
-                  if (localValue !== null) {
-                    evalScope[localName] = localValue;
-                  }
-                }
-                for (const localName of moduleInfo.imports.keys()) {
-                  if (!identifierMentioned(assignment.valueSource, localName)) {
-                    continue;
-                  }
-                  const localValue = resolveIdentifierInModule(
-                    [localName],
-                    normalizedId,
-                  );
-                  if (localValue !== null) {
-                    evalScope[localName] = localValue;
-                  }
-                }
-                value = evaluateExpression(assignment.valueSource, evalScope);
-              }
+              value = evaluateExpression(
+                assignment.valueSource,
+                staticResolver.buildEvalScope(
+                  normalizedId,
+                  undefined,
+                  assignment.valueSource,
+                ),
+              );
             }
             if (value === null) {
               if (
@@ -4979,7 +4036,8 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                 );
 
                 if (partialParsed) {
-                  const parsedRoot = partialParsed.root ?? partialParsed.rootVars;
+                  const parsedRoot = partialParsed.root ??
+                    partialParsed.rootVars;
                   if (assignment.property === "base") {
                     configParts.base = partialParsed.base;
                   } else if (assignment.property === "global") {
@@ -5049,7 +4107,9 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               };
             } else {
               configParts[
-                assignment.property === "rootVars" ? "root" : assignment.property
+                assignment.property === "rootVars"
+                  ? "root"
+                  : assignment.property
               ] = value;
             }
           }
@@ -5083,14 +4143,18 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
 
                 if (
                   typeof entry === "string" ||
-                  (typeof entry === "object" && entry !== null && "path" in entry)
+                  (typeof entry === "object" && entry !== null &&
+                    "path" in entry)
                 ) {
                   const currentGlobal = ensureGlobal();
                   currentGlobal["@import"] = currentGlobal["@import"] ?? [];
                   if (Array.isArray(currentGlobal["@import"])) {
                     currentGlobal["@import"].push(entry);
                   } else {
-                    currentGlobal["@import"] = [currentGlobal["@import"], entry];
+                    currentGlobal["@import"] = [
+                      currentGlobal["@import"],
+                      entry,
+                    ];
                   }
                 } else if (typeof entry === "object" && entry !== null) {
                   if ("rules" in entry) {
@@ -5206,11 +4270,15 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           }
 
           for (const [key, style] of Object.entries(parsed.base)) {
-            const generatedClassName = hasStyleDeclarations(style.declaration) ||
+            const generatedClassName =
+              hasStyleDeclarations(style.declaration) ||
                 !hasTailwindClassNames(style)
-              ? createClassName(key, style.declaration, normalizedId)
-              : undefined;
-            const classValue = resolveStyleClassValue(generatedClassName, style);
+                ? createClassName(key, style.declaration, normalizedId)
+                : undefined;
+            const classValue = resolveStyleClassValue(
+              generatedClassName,
+              style,
+            );
             classMap[key] = classValue;
             if (!generatedClassName) {
               continue;
@@ -5305,7 +4373,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           }
 
           const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-          const inkCall = `ink(${runtimeConfigLiteral}, ${
+          const inkCall = `${decl.constructorSource}(${runtimeConfigLiteral}, ${
             JSON.stringify(compiledConfig)
           }, ${runtimeOptionsLiteral})`;
           replacements.push({
@@ -5335,7 +4403,9 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             nextCode.slice(replacement.end);
         }
 
-        nextCode = stripUnusedStaticHelperConsts(nextCode);
+        if (!isSvelte && !isAstro) {
+          nextCode = stripUnusedStaticHelperConsts(nextCode, normalizedId);
+        }
         const needsTailwindRuntimeImport =
           nextCode.includes('"tailwindClassNames"') ||
           /\btw\s*\(/.test(nextCode);
@@ -5433,47 +4503,61 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       const hasImportModule = /\.importModule\s*\(/.test(code);
       if (hasImportModule) {
         return (async () => {
-          const currentModuleInfo = parseModuleStaticInfo(code);
+          const currentModuleInfo = getModuleInfo(normalizedId);
           if (currentModuleInfo && this?.load) {
             for (const decl of newInkDecls) {
               for (const assign of decl.assignments) {
                 if (assign.property === "importModule") {
-                  const binding = currentModuleInfo.imports.get(assign.valueSource.trim());
-                  if (binding && (binding.source.includes(".module.css") || binding.source.includes(".module.scss") || binding.source.includes(".module.sass") || binding.source.includes(".module.less"))) {
+                  const binding = currentModuleInfo.imports.get(
+                    assign.valueSource.trim(),
+                  );
+                  if (
+                    binding &&
+                    (binding.source.includes(".module.css") ||
+                      binding.source.includes(".module.scss") ||
+                      binding.source.includes(".module.sass") ||
+                      binding.source.includes(".module.less"))
+                  ) {
                     const resolvedImportFile = resolveImportToFile(
                       normalizedId,
                       binding.source,
-                      {
-                        projectRoot,
-                        viteRoot,
-                        viteAliases,
-                        tsconfigResolver,
-                      },
+                      importResolverOptions,
                     );
                     if (resolvedImportFile) {
                       try {
-                        const loaded = await this.load({ id: resolvedImportFile });
+                        const loaded = await this.load({
+                          id: resolvedImportFile,
+                        });
                         if (loaded && loaded.code) {
-                          const cssModuleInfo = parseModuleStaticInfo(loaded.code);
-                          moduleInfoCache.set(resolvedImportFile, cssModuleInfo);
+                          const cssModuleInfo = parseStaticModuleInfo(
+                            loaded.code,
+                            resolvedImportFile,
+                          );
+                          moduleInfoCache.set(
+                            resolvedImportFile,
+                            cssModuleInfo,
+                          );
                           if (cssModuleInfo.defaultExportExpression) {
+                            const defaultExpression =
+                              cssModuleInfo.defaultExportExpression;
                             const parsedMapping = parseStaticExpression(
-                              cssModuleInfo.defaultExportExpression,
-                              (nestedPath) => {
-                                const head = nestedPath[0];
-                                const initializerInfo = cssModuleInfo.constInitializers.get(head);
-                                if (initializerInfo) {
-                                  const val = parseStaticExpression(initializerInfo.initializer);
-                                  if (val !== null) {
-                                    return nestedPath.length > 1
-                                      ? readMemberPath(val, nestedPath.slice(1))
-                                      : val;
-                                  }
-                                }
-                                return undefined;
-                              }
+                              defaultExpression,
+                              (nestedPath) =>
+                                resolveIdentifierInModule(
+                                  nestedPath,
+                                  resolvedImportFile,
+                                ) ?? undefined,
+                            ) ?? evaluateExpression(
+                              defaultExpression,
+                              staticResolver.buildEvalScope(
+                                resolvedImportFile,
+                                undefined,
+                                defaultExpression,
+                              ),
                             );
-                            if (parsedMapping && typeof parsedMapping === "object") {
+                            if (
+                              parsedMapping && typeof parsedMapping === "object"
+                            ) {
                               cssModuleMappings.set(
                                 assign.valueSource.trim(),
                                 parsedMapping as Record<string, string>,
@@ -5481,7 +4565,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
                             }
                           }
                         }
-                      } catch (e) {
+                      } catch {
                         // ignore and proceed
                       }
                     }
