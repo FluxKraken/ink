@@ -370,6 +370,68 @@ Deno.test("svelte component CSS is extracted into virtual stylesheet", () => {
   );
 });
 
+Deno.test("svelte module CSS survives early shared virtual load ordering", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default {\n` +
+        `  containers: {\n` +
+        `    card: { type: "inline-size", rule: "width < 20rem" },\n` +
+        `  },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+    const componentId = `${root}/src/lib/Card.svelte`;
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const earlySharedCss = load(VIRTUAL_ID);
+    assertEquals(earlySharedCss, "");
+
+    const source = `<script lang="ts">\n` +
+      `import ink from "@kraken/ink";\n` +
+      `const styles = new ink();\n` +
+      `styles.base = {\n` +
+      `  wrapper: { "@set": "card" },\n` +
+      `  content: { "@card": { textAlign: "left" } },\n` +
+      `};\n` +
+      `</script>\n\n` +
+      `<div class={styles.wrapper()}><p class={styles.content()}>hi</p></div>`;
+
+    const transformed = transform(source, componentId);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.includes(
+      `virtual:ink/styles.css?${MODULE_VIRTUAL_QUERY_KEY}=${
+        encodeURIComponent(componentId)
+      }`,
+    ));
+
+    const scopedCss = load(scopedVirtualId(componentId));
+    assertEquals(typeof scopedCss, "string");
+    assertMatch(
+      scopedCss as string,
+      /\.ink_[a-z0-9]+\{container-name:card;container-type:inline-size\}/,
+    );
+    assertMatch(
+      scopedCss as string,
+      /@container card \(width < 20rem\)\{\.ink_[a-z0-9]+\{text-align:left\}\}/,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("statically evaluates mixed default and named ink imports in svelte assignments", () => {
   const root = Deno.makeTempDirSync();
 

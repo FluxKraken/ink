@@ -3259,8 +3259,8 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       logDynamic: false,
       logStatic: false,
     },
-      breakpoints: {},
-      breakpointBoundary: "inclusive",
+    breakpoints: {},
+    breakpointBoundary: "inclusive",
     containers: {},
     layers: [],
     defaultUnit: undefined,
@@ -4476,6 +4476,10 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             }
             didVirtualCssChange = true;
           }
+
+          if (nextImports.length > 0 || nextCss.length > 0) {
+            scopedVirtualImport = moduleVirtualImportId(normalizedId);
+          }
         } else {
           nextCode = isAstro
             ? addVirtualImportToAstro(nextCode)
@@ -4515,7 +4519,9 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         }
 
         if (scopedVirtualImport) {
-          nextCode = isAstro
+          nextCode = isSvelte
+            ? addVirtualImportToSvelte(nextCode, scopedVirtualImport)
+            : isAstro
             ? addModuleVirtualImportToAstro(nextCode, scopedVirtualImport)
             : addVirtualImport(nextCode, scopedVirtualImport);
         }
