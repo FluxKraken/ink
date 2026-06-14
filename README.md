@@ -311,7 +311,8 @@ styles.fonts = [
 ### Themes and theme variables
 
 `Theme` converts friendly token names into CSS custom properties. `tVar` reads
-them back inside style objects.
+them back inside style objects. Theme values can be any CSS value accepted by
+Ink, not only colors, and nested objects organize related tokens into groups.
 
 ```ts
 import ink, { Theme, tVar } from "@kraken/ink";
@@ -320,28 +321,45 @@ const styles = new ink();
 
 styles.themes = {
   default: new Theme({
-    surface: "#ffffff",
-    text: "#111827",
-    accent: "#2563eb",
+    cornerRadius: "0.5rem",
+    fontSizes: {
+      regular: 1,
+      medium: 1.25,
+      large: 2,
+    },
+    content: {
+      background: "#ffffff",
+      foreground: "#111827",
+    },
   }),
   dark: new Theme({
-    surface: "#111827",
-    text: "#f9fafb",
-    accent: "#60a5fa",
+    cornerRadius: "0.5rem",
+    fontSizes: {
+      regular: 1,
+      medium: 1.25,
+      large: 2,
+    },
+    content: {
+      background: "#111827",
+      foreground: "#f9fafb",
+    },
   }),
 };
 
 styles.base = {
   panel: {
-    backgroundColor: tVar.surface,
-    color: tVar.text,
-    border: [1, "solid", tVar.accent],
-  },
-  hero: {
-    backgroundImage: tVar.eval("linear-gradient({surface}, {accent})"),
+    backgroundColor: tVar.content.background,
+    color: tVar.content.foreground,
+    borderRadius: tVar.cornerRadius,
+    fontSize: tVar.fontSizes.medium,
   },
 };
 ```
+
+Nested paths are joined with `-` while preserving key casing:
+`content.foreground` becomes `--content-foreground`, and `fontSizes.medium`
+becomes `--fontSizes-medium`. Existing flat friendly tokens continue to use
+camelCase-to-kebab conversion.
 
 Keys in `themes` behave like this:
 

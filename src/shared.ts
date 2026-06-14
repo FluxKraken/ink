@@ -128,8 +128,10 @@ export type RootVarInput =
     vars: Record<string, StyleValue>;
     layer?: string;
   };
-/** Friendly token map accepted by {@link Theme}. */
-export type ThemeTokenInput = Record<string, StyleValue>;
+/** Friendly token map accepted by {@link Theme}, including nested token groups. */
+export interface ThemeTokenInput {
+  [token: string]: StyleValue | ThemeTokenInput;
+}
 /** Advanced theme input with an explicit selector used by custom theme mode. */
 export interface ThemeAdvancedInput {
   /** Selector used as the theme scope root when `themeMode` is `"custom"`. */
@@ -353,18 +355,61 @@ export function toThemeVarName(token: string): string {
   return trimmed.startsWith("--") ? trimmed : `--${camelToKebab(trimmed)}`;
 }
 
+/** Convert a nested theme token path into a case-preserving CSS custom property. */
+export function toThemeVarPathName(path: readonly string[]): string {
+  if (path.length === 0) {
+    throw new Error("Theme token paths must not be empty.");
+  }
+
+  const segments = path.map((segment) => {
+    const trimmed = segment.trim();
+    if (trimmed.length === 0) {
+      throw new Error("Theme token names must not be empty.");
+    }
+    return trimmed;
+  });
+
+  if (segments.length === 1) {
+    return toThemeVarName(segments[0]);
+  }
+
+  return `--${
+    segments.map((segment) =>
+      segment.startsWith("--") ? segment.slice(2) : segment
+    ).join("-")
+  }`;
+}
+
+function isThemeTokenGroup(value: unknown): value is ThemeTokenInput {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !isCssVarRef(value)
+  );
+}
+
 function normalizeThemeTokens(
   tokens: Record<string, unknown>,
+  path: readonly string[] = [],
 ): Record<string, StyleValue> {
   const vars: Record<string, StyleValue> = {};
 
   for (const [token, value] of Object.entries(tokens)) {
-    if (!isThemeStyleValue(value)) {
-      throw new Error(
-        `Theme token "${token}" must be a string, number, ink variable reference, or array of those values.`,
-      );
+    const tokenPath = [...path, token];
+    if (isThemeStyleValue(value)) {
+      vars[toThemeVarPathName(tokenPath)] = value;
+      continue;
     }
-    vars[toThemeVarName(token)] = value;
+    if (isThemeTokenGroup(value)) {
+      Object.assign(vars, normalizeThemeTokens(value, tokenPath));
+      continue;
+    }
+    throw new Error(
+      `Theme token "${
+        tokenPath.join(".")
+      }" must be a string, number, ink variable reference, array of those values, or a nested token group.`,
+    );
   }
 
   return vars;
@@ -460,17 +505,41 @@ export function themeVar(
 /** Expand `{token}` placeholders into `var(--token)` references. */
 export function evalThemeTemplate(template: string): string {
   return template.replace(/\{([^{}]+)\}/g, (_match, token: string) => {
-    const varName = toThemeVarName(token.trim());
+    const varName = toThemeVarPathName(token.split("."));
     return `var(${varName})`;
   });
 }
 
-export type ThemeVarAccessor = Record<string, CssVarRef> & {
+export type ThemeVarReference =
+  & CssVarRef
+  & {
+    readonly [token: string]: ThemeVarReference;
+  };
+
+export type ThemeVarAccessor = Record<string, ThemeVarReference> & {
   /** Expand a CSS string template containing `{token}` placeholders. */
   eval(template: string): string;
 };
 
-/** Proxy that maps `tVar.headerBG` to `var(--header-bg)`. */
+function createThemeVarReference(path: readonly string[]): ThemeVarReference {
+  const reference = cVar(toThemeVarPathName(path));
+  return new Proxy(reference as ThemeVarReference, {
+    get(target, prop, receiver) {
+      if (
+        typeof prop !== "string" ||
+        Object.prototype.hasOwnProperty.call(target, prop)
+      ) {
+        return Reflect.get(target, prop, receiver);
+      }
+      if (prop === "then") {
+        return undefined;
+      }
+      return createThemeVarReference([...path, prop]);
+    },
+  });
+}
+
+/** Proxy that maps theme token paths to CSS custom property references. */
 export const tVar = new Proxy({} as ThemeVarAccessor, {
   get(_target, prop) {
     if (typeof prop !== "string") {
@@ -479,7 +548,10 @@ export const tVar = new Proxy({} as ThemeVarAccessor, {
     if (prop === "eval") {
       return evalThemeTemplate;
     }
-    return themeVar(prop);
+    if (prop === "then") {
+      return undefined;
+    }
+    return createThemeVarReference([prop]);
   },
 }) as ThemeVarAccessor;
 
@@ -1104,7 +1176,7 @@ export function toCssDeclaration(
   value: DeclarationStyleValue,
   options?: CssSerializationOptions,
 ): string {
-  const property = camelToKebab(name);
+  const property = name.startsWith("--") ? name : camelToKebab(name);
   return `${property}:${formatStyleValue(property, value, options)}`;
 }
 

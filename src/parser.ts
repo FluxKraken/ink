@@ -20,7 +20,7 @@ import {
   type ThemeMode,
   toFontVarName,
   toTailwindVariantForNestedKey,
-  toThemeVarName,
+  toThemeVarPathName,
   tw,
 } from "./shared.js";
 
@@ -900,16 +900,16 @@ function identifierReferenceToCssLiteral(value: unknown): string | null {
 function identifierReferenceToThemeVar(
   value: unknown,
 ): ReturnType<typeof cVar> | null {
-  if (!isIdentifierReference(value) || value.path.length !== 2) {
+  if (!isIdentifierReference(value) || value.path.length < 2) {
     return null;
   }
 
-  const [head, token] = value.path;
-  if (head !== "tVar" || token.length === 0) {
+  const [head, ...tokenPath] = value.path;
+  if (head !== "tVar" || tokenPath.some((token) => token.length === 0)) {
     return null;
   }
 
-  return cVar(toThemeVarName(token));
+  return cVar(toThemeVarPathName(tokenPath));
 }
 
 function identifierReferenceToFontVar(
@@ -1540,6 +1540,7 @@ function toColorSchemeThemeName(scope: string): "default" | "dark" | null {
 function normalizeThemeVarsRecord(
   value: unknown,
   options: ParseInkOptions,
+  path: readonly string[] = [],
 ): Record<string, StyleValue> | null {
   if (!isPlainObject(value) || isCssVarRef(value)) {
     return null;
@@ -1547,12 +1548,17 @@ function normalizeThemeVarsRecord(
 
   const normalizedVars: Record<string, StyleValue> = {};
   for (const [token, tokenValue] of Object.entries(value)) {
+    const tokenPath = [...path, token];
     const normalizedValue = normalizeStyleLeafValue(tokenValue);
-    if (normalizedValue === null) {
+    if (normalizedValue !== null) {
+      normalizedVars[toThemeVarPathName(tokenPath)] = normalizedValue;
+      continue;
+    }
+    const nestedVars = normalizeThemeVarsRecord(tokenValue, options, tokenPath);
+    if (nestedVars === null) {
       return null;
     }
-    normalizedVars[token.startsWith("--") ? token : toThemeVarName(token)] =
-      normalizedValue;
+    Object.assign(normalizedVars, nestedVars);
   }
 
   return normalizedVars;
@@ -2090,7 +2096,9 @@ function resolveParsedValue(
           >[0],
         );
       }
-      return new Theme(resolvedArgument as Record<string, StyleValue>);
+      return new Theme(
+        resolvedArgument as ConstructorParameters<typeof Theme>[0],
+      );
     } catch {
       return keepUnresolvedIdentifiers ? value : UNRESOLVED;
     }

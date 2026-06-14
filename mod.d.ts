@@ -27,6 +27,7 @@ import {
   ThemeAdvancedInput,
   ThemeMode,
   ThemeTokenInput,
+  ThemeVarAccessor,
   tw,
 } from "./dist/shared.d.ts";
 import type { InkVitePluginOptions } from "./dist/vite.d.ts";
@@ -299,7 +300,7 @@ export interface Ink {
   /** Tailwind class helper. */
   tw: typeof tw;
   /** Theme variable proxy. */
-  tVar: Record<string, CssVarRef>;
+  tVar: ThemeVarAccessor;
   /** Type a project-wide Ink config. */
   defineInkConfig: typeof defineInkConfig;
   /** Backwards-compatible config helper alias. Prefer `defineInkConfig`. */
@@ -324,7 +325,7 @@ export { ThemeAdvanced };
 /** Named export for Tailwind-aware class markers. */
 export { tw };
 /** Named export for referencing theme-backed CSS variables. */
-export const tVar: Record<string, CssVarRef>;
+export const tVar: ThemeVarAccessor;
 /** Named export for typing `ink.config.ts` files. */
 export { defineInkConfig };
 /** Backwards-compatible config helper alias. Prefer `defineInkConfig`. */

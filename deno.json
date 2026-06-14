@@ -1,6 +1,6 @@
 {
   "name": "@kraken/ink",
-  "version": "0.5.43",
+  "version": "0.5.44",
   "license": "MIT",
   "exports": {
     ".": "./mod.ts",
@@ -23,10 +23,7 @@
       "dist/**/*.js",
       "dist/**/*.d.ts"
     ],
-    "exclude": [
-      "!dist/",
-      "!dist/**"
-    ]
+    "exclude": ["!dist/", "!dist/**"]
   },
   "tasks": {
     "build": "rm -rf dist && deno cache --node-modules-dir=auto npm:@types/node@^22.10.2 && deno run --node-modules-dir=auto -A npm:typescript/bin/tsc -p tsconfig.json",

@@ -991,19 +991,57 @@ Deno.test("Theme and tVar map friendly theme tokens to css custom properties", (
   const theme = new Theme({
     headerBG: "black",
     "--header-fg": "white",
+    cornerRadius: "0.5rem",
+    fontSizes: {
+      regular: 1,
+      medium: 1.25,
+      large: 2,
+    },
+    content: {
+      background: "white",
+      foreground: "black",
+    },
   });
 
   assertEquals(theme.vars, {
     "--header-bg": "black",
     "--header-fg": "white",
+    "--corner-radius": "0.5rem",
+    "--fontSizes-regular": 1,
+    "--fontSizes-medium": 1.25,
+    "--fontSizes-large": 2,
+    "--content-background": "white",
+    "--content-foreground": "black",
   });
   assertEquals(
     toCssDeclaration("backgroundColor", tVar.headerBG),
     "background-color:var(--header-bg)",
   );
   assertEquals(
+    toCssDeclaration("borderRadius", tVar.cornerRadius),
+    "border-radius:var(--corner-radius)",
+  );
+  assertEquals(
+    toCssDeclaration("fontSize", tVar.fontSizes.medium),
+    "font-size:var(--fontSizes-medium)",
+  );
+  assertEquals(
+    toCssDeclaration("color", tVar.content.foreground),
+    "color:var(--content-foreground)",
+  );
+  assertEquals(
+    toCssDeclaration("--fontSizes-medium", 1.25),
+    "--fontSizes-medium:1.25px",
+  );
+  assertEquals(
     tVar.eval("linear-gradient(147deg, {headerBG}, {headerFG})"),
     "linear-gradient(147deg, var(--header-bg), var(--header-fg))",
+  );
+  assertEquals(
+    tVar.eval(
+      "clamp({fontSizes.regular}, {fontSizes.medium}, {fontSizes.large})",
+    ),
+    "clamp(var(--fontSizes-regular), var(--fontSizes-medium), var(--fontSizes-large))",
   );
 });
 
@@ -2054,6 +2092,38 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
   `);
 });
 
+Deno.test("published types accept nested themes and nested tVar references", () => {
+  assertPackageTypesSucceed(`
+    import ink, { Theme, tVar, type ThemeTokenInput } from "@kraken/ink";
+
+    const defaultTokens: ThemeTokenInput = {
+      cornerRadius: "0.5rem",
+      fontSizes: {
+        regular: 1,
+        medium: 1.25,
+        large: 2,
+      },
+      content: {
+        background: "white",
+        foreground: "black",
+      },
+    };
+
+    const styles = new ink();
+    styles.themes = {
+      default: new Theme(defaultTokens),
+    };
+    styles.base = {
+      content: {
+        background: tVar.content.background,
+        color: ink.tVar.content.foreground,
+        fontSize: tVar.fontSizes.medium,
+        borderRadius: tVar.cornerRadius,
+      },
+    };
+  `);
+});
+
 Deno.test("published types accept flexible font variation settings", () => {
   assertPackageTypesSucceed(`
     import ink from "@kraken/ink";
@@ -2272,6 +2342,52 @@ Deno.test("parser expands themes and resolves tVar references", () => {
   assertEquals(
     styleDeclarationOf(parsed.base.header).backgroundColor,
     cVar("--header-bg"),
+  );
+});
+
+Deno.test("parser flattens nested theme groups and resolves nested tVar references", () => {
+  const parsed = parseInkCallArguments(`{
+    themes: {
+      default: {
+        fontSizes: {
+          regular: 1,
+          medium: 1.25
+        },
+        content: {
+          background: "white",
+          foreground: "black"
+        }
+      }
+    },
+    base: {
+      content: {
+        background: tVar.content.background,
+        color: tVar.content.foreground,
+        fontSize: tVar.fontSizes.medium
+      }
+    }
+  }`);
+
+  assert(parsed !== null);
+  assertEquals(parsed.root, [
+    {
+      "--fontSizes-regular": 1,
+      "--fontSizes-medium": 1.25,
+      "--content-background": "white",
+      "--content-foreground": "black",
+    },
+  ]);
+  assertEquals(
+    styleDeclarationOf(parsed.base.content).background,
+    cVar("--content-background"),
+  );
+  assertEquals(
+    styleDeclarationOf(parsed.base.content).color,
+    cVar("--content-foreground"),
+  );
+  assertEquals(
+    styleDeclarationOf(parsed.base.content).fontSize,
+    cVar("--fontSizes-medium"),
   );
 });
 
@@ -7061,6 +7177,50 @@ Deno.test("vite extracts tVar references from new ink() builder assignments", ()
   assertMatch(
     css,
     /\.ink_[a-z0-9]+\{background-color:var\(--header-bg\);color:var\(--header-fg\)\}/,
+  );
+});
+
+Deno.test("vite extracts nested Theme groups and nested tVar references", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const id = `${Deno.cwd()}/src/theme-builder-nested-tVar.astro`;
+
+  const moduleCode = `---\n` +
+    `import ink, { Theme, tVar } from "./index.ts";\n` +
+    `const styles = new ink();\n` +
+    `styles.themes = {\n` +
+    `  default: new Theme({\n` +
+    `    cornerRadius: "0.5rem",\n` +
+    `    fontSizes: { medium: 1.25 },\n` +
+    `    content: { background: "white", foreground: "black" },\n` +
+    `  }),\n` +
+    `};\n` +
+    `styles.base = {\n` +
+    `  content: {\n` +
+    `    background: tVar.content.background,\n` +
+    `    color: tVar.content.foreground,\n` +
+    `    fontSize: tVar.fontSizes.medium,\n` +
+    `    borderRadius: tVar.cornerRadius,\n` +
+    `  },\n` +
+    `};\n` +
+    `---\n` +
+    `<div class={styles().content()}>hi</div>`;
+  const transformed = transform(moduleCode, id);
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const css = load(VIRTUAL_ID) as string;
+  assert(
+    css.includes(
+      ":root{--corner-radius:0.5rem;--fontSizes-medium:1.25px;--content-background:white;--content-foreground:black}",
+    ),
+    css,
+  );
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{background:var\(--content-background\);color:var\(--content-foreground\);font-size:var\(--fontSizes-medium\);border-radius:var\(--corner-radius\)\}/,
   );
 });
 
