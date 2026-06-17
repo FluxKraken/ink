@@ -3729,6 +3729,39 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           }, undefined, ${runtimeOptionsLiteral})`;
         }
 
+        function parseStaticInkConfigSource(source: string) {
+          const parseOptions = {
+            utilities: inkConfig.utilities,
+            containers: inkConfig.containers,
+            themeMode: inkConfig.themeMode,
+          };
+          const parsed = parseInkCallArgumentsWithResolver(
+            source,
+            (identifierPath) =>
+              resolveIdentifierInModule(identifierPath, normalizedId) ??
+                undefined,
+            parseOptions,
+          ) ?? parseInkCallArguments(source, parseOptions);
+          if (parsed) {
+            return parsed;
+          }
+
+          const evaluated = parseStaticExpression(
+            source,
+            (identifierPath) =>
+              resolveIdentifierInModule(identifierPath, normalizedId) ??
+                undefined,
+          ) ?? evaluateExpression(
+            source,
+            staticResolver.buildEvalScope(normalizedId, undefined, source),
+          );
+          if (!isRecord(evaluated)) {
+            return null;
+          }
+
+          return parseInkConfig(evaluated, parseOptions);
+        }
+
         for (const call of calls) {
           if (resolution === "dynamic") {
             replacements.push({
@@ -3740,22 +3773,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             continue;
           }
 
-          const parsed = parseInkCallArgumentsWithResolver(
-            call.arg,
-            (identifierPath) =>
-              resolveIdentifierInModule(identifierPath, normalizedId) ??
-                undefined,
-            {
-              utilities: inkConfig.utilities,
-              containers: inkConfig.containers,
-              themeMode: inkConfig.themeMode,
-            },
-          ) ??
-            parseInkCallArguments(call.arg, {
-              utilities: inkConfig.utilities,
-              containers: inkConfig.containers,
-              themeMode: inkConfig.themeMode,
-            });
+          const parsed = parseStaticInkConfigSource(call.arg);
           if (!parsed) {
             if (resolution === "static") {
               throw staticResolutionError(

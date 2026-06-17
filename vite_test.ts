@@ -985,6 +985,8 @@ Deno.test("cVar() formats css variable references", () => {
     toCssDeclaration("fontWeight", cVar("--weight", 600)),
     "font-weight:var(--weight, 600)",
   );
+  assertEquals(String(cVar("--background")), "var(--background)");
+  assertEquals(String(cVar("--background", "#111")), "var(--background, #111)");
 });
 
 Deno.test("Theme and tVar map friendly theme tokens to css custom properties", () => {
@@ -1029,6 +1031,7 @@ Deno.test("Theme and tVar map friendly theme tokens to css custom properties", (
     toCssDeclaration("color", tVar.content.foreground),
     "color:var(--content-foreground)",
   );
+  assertEquals(String(tVar.site.width), "var(--site-width)");
   assertEquals(
     toCssDeclaration("--fontSizes-medium", 1.25),
     "--fontSizes-medium:1.25px",
@@ -2107,7 +2110,11 @@ Deno.test("published types accept nested themes and nested tVar references", () 
         background: "white",
         foreground: "black",
       },
+      site: {
+        width: "70rem",
+      },
     };
+    const responsiveWidth = (width: string) => \`min(\${width}, 100%)\`;
 
     const styles = new ink();
     styles.themes = {
@@ -2119,6 +2126,7 @@ Deno.test("published types accept nested themes and nested tVar references", () 
         color: ink.tVar.content.foreground,
         fontSize: tVar.fontSizes.medium,
         borderRadius: tVar.cornerRadius,
+        width: responsiveWidth(tVar.site.width),
       },
     };
   `);
@@ -5874,6 +5882,199 @@ Deno.test("new ink() extracts styles computed by imported named const arrow func
     assertMatch(
       css,
       /\.ink_[a-z0-9]+\{width:min\(60rem, 100%\);margin-inline:auto\}/,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("new ink({ simple: true }) extracts tVar values passed through imported helper functions", () => {
+  const plugin = inkVite();
+  const configResolved = asHook(plugin.configResolved);
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const stylesDir = `${root}/src/lib/styles`;
+    const componentDir = `${root}/src/lib/components/layout`;
+    Deno.mkdirSync(stylesDir, { recursive: true });
+    Deno.mkdirSync(componentDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.js`,
+      `export default { resolution: "static" };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${stylesDir}/utilities.ts`,
+      `export default {\n` +
+        `  layout: {\n` +
+        `    responsiveWidth: (width: string) => \`min(\${width}, 100%)\`,\n` +
+        `  },\n` +
+        `} as const;\n`,
+    );
+
+    configResolved({
+      root,
+      resolve: {
+        alias: [{ find: "@styles", replacement: stylesDir }],
+      },
+    });
+
+    const moduleCode = `<script lang="ts">\n` +
+      `  import ink, { tw, tVar } from "@kraken/ink";\n` +
+      `  import Utilities from "@styles/utilities";\n` +
+      `  let { children } = $props();\n` +
+      `  const content = new ink({ simple: true });\n` +
+      `  content.base = {\n` +
+      `    "@apply": tw(["prose", "dark:prose-invert", "max-w-none"]),\n` +
+      `    background: tVar.content.background,\n` +
+      `    color: tVar.content.foreground,\n` +
+      `    width: Utilities.layout.responsiveWidth(tVar.site.width),\n` +
+      `    "h1, h2, h3, h4, h5, h6": {\n` +
+      `      color: tVar.content.foreground,\n` +
+      `    },\n` +
+      `  };\n` +
+      `</script>\n` +
+      `<main class={content()}></main>\n`;
+    const transformed = transform(
+      moduleCode,
+      `${componentDir}/Content.svelte`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(!code.includes(`new ink({ simple: true })`));
+    assert(code.includes(`"simple":true`));
+
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(
+      css,
+      /\.ink_[a-z0-9]+\{background:var\(--content-background\);color:var\(--content-foreground\);width:min\(var\(--site-width\), 100%\)\}/,
+    );
+    assertMatch(
+      css,
+      /\.ink_[a-z0-9]+ h1, \.ink_[a-z0-9]+ h2, \.ink_[a-z0-9]+ h3, \.ink_[a-z0-9]+ h4, \.ink_[a-z0-9]+ h5, \.ink_[a-z0-9]+ h6\{color:var\(--content-foreground\)\}/,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("new ink() full builder extracts tVar values passed through imported helper functions", () => {
+  const plugin = inkVite();
+  const configResolved = asHook(plugin.configResolved);
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const stylesDir = `${root}/src/lib/styles`;
+    Deno.mkdirSync(stylesDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.js`,
+      `export default { resolution: "static" };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${stylesDir}/utilities.ts`,
+      `export default {\n` +
+        `  layout: {\n` +
+        `    responsiveWidth: (width: string) => \`min(\${width}, 100%)\`,\n` +
+        `  },\n` +
+        `} as const;\n`,
+    );
+
+    configResolved({
+      root,
+      resolve: {
+        alias: [{ find: "@styles", replacement: stylesDir }],
+      },
+    });
+
+    const moduleCode = `import ink, { tVar } from "@kraken/ink";\n` +
+      `import LayoutTools from "@styles/utilities";\n` +
+      `const styles = new ink();\n` +
+      `styles.base = {\n` +
+      `  content: {\n` +
+      `    width: LayoutTools.layout.responsiveWidth(tVar.site.width),\n` +
+      `    background: tVar.content.background,\n` +
+      `  },\n` +
+      `};\n` +
+      `export default styles;\n`;
+    const transformed = transform(moduleCode, `${root}/src/routes/+page.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(!code.includes(`new ink()`));
+
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(
+      css,
+      /\.ink_[a-z0-9]+\{width:min\(var\(--site-width\), 100%\);background:var\(--content-background\)\}/,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("ink() object config extracts tVar values passed through imported helper functions", () => {
+  const plugin = inkVite();
+  const configResolved = asHook(plugin.configResolved);
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const stylesDir = `${root}/src/lib/styles`;
+    Deno.mkdirSync(stylesDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.js`,
+      `export default { resolution: "static" };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${stylesDir}/utilities.ts`,
+      `export default {\n` +
+        `  layout: {\n` +
+        `    responsiveWidth: (width: string) => \`min(\${width}, 100%)\`,\n` +
+        `  },\n` +
+        `} as const;\n`,
+    );
+
+    configResolved({
+      root,
+      resolve: {
+        alias: [{ find: "@styles", replacement: stylesDir }],
+      },
+    });
+
+    const moduleCode = `import ink, { tVar } from "@kraken/ink";\n` +
+      `import StyleUtils from "@styles/utilities";\n` +
+      `export const styles = ink({\n` +
+      `  base: {\n` +
+      `    content: {\n` +
+      `      width: StyleUtils.layout.responsiveWidth(tVar.site.width),\n` +
+      `      color: tVar.content.foreground,\n` +
+      `    },\n` +
+      `  },\n` +
+      `});\n`;
+    const transformed = transform(moduleCode, `${root}/src/routes/+page.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(!code.includes(`StyleUtils.layout.responsiveWidth`));
+
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(
+      css,
+      /\.ink_[a-z0-9]+\{width:min\(var\(--site-width\), 100%\);color:var\(--content-foreground\)\}/,
     );
   } finally {
     Deno.removeSync(root, { recursive: true });

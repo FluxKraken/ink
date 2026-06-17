@@ -511,6 +511,7 @@ export function evalThemeTemplate(template: string): string {
 }
 
 export type ThemeVarReference =
+  & string
   & CssVarRef
   & {
     readonly [token: string]: ThemeVarReference;
@@ -2031,11 +2032,25 @@ export function cVar(name: string, fallback?: PrimitiveStyleValue): CssVarRef {
     throw new Error("cVar() fallback must be a string or number");
   }
 
-  return {
+  const reference = {
     kind: "ink-var",
     name,
     fallback,
-  };
+  } as CssVarRef;
+
+  Object.defineProperties(reference, {
+    [Symbol.toPrimitive]: {
+      value: () => formatCssVarRef(reference),
+    },
+    toString: {
+      value: () => formatCssVarRef(reference),
+    },
+    valueOf: {
+      value: () => formatCssVarRef(reference),
+    },
+  });
+
+  return reference;
 }
 
 /**
@@ -2049,6 +2064,13 @@ export function isCssVarRef(value: unknown): value is CssVarRef {
     "kind" in value &&
     (value as CssVarRef).kind === "ink-var"
   );
+}
+
+function formatCssVarRef(value: CssVarRef): string {
+  if (value.fallback === undefined) {
+    return `var(${value.name})`;
+  }
+  return `var(${value.name}, ${String(value.fallback)})`;
 }
 
 function formatPrimitiveStyleValue(
