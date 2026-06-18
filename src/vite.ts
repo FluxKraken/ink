@@ -153,6 +153,7 @@ type LoadedInkConfig = {
   layers: string[];
   defaultUnit?: string;
   include: string[];
+  rootLayout: string | null;
   utilities: NormalizedStyleSheet;
   configCss: string;
   utilityCss: string;
@@ -817,6 +818,20 @@ function addVirtualImportToAstro(
   return `---\nimport "${importId}";\n---\n${code}`;
 }
 
+function addVirtualImportToModule(
+  code: string,
+  options: { isSvelte: boolean; isAstro: boolean },
+  importId = PUBLIC_VIRTUAL_ID,
+): string {
+  if (options.isSvelte) {
+    return addVirtualImportToSvelte(code, importId);
+  }
+  if (options.isAstro) {
+    return addVirtualImportToAstro(code, importId);
+  }
+  return addVirtualImport(code, importId);
+}
+
 function addModuleVirtualImportToAstro(code: string, importId: string): string {
   if (code.includes(importId)) {
     return code;
@@ -1311,6 +1326,23 @@ function normalizeIncludePaths(value: unknown, baseDir: string): string[] {
     );
 
   return Array.from(new Set(normalized));
+}
+
+function normalizeRootLayoutPath(value: unknown, baseDir: string): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  return getNodePath().normalize(
+    getNodePath().isAbsolute(trimmed)
+      ? trimmed
+      : getNodePath().resolve(baseDir, trimmed),
+  );
 }
 
 function toBrowserStylesheetPath(
@@ -1925,6 +1957,7 @@ function loadInkConfig(
       layers: [],
       defaultUnit: undefined,
       include: [],
+      rootLayout: null,
       utilities: {},
       configCss: "",
       utilityCss: "",
@@ -2073,6 +2106,10 @@ function loadInkConfig(
   const allImports = Array.from(new Set(resolvedImports));
 
   const include = normalizeIncludePaths(configObject.include, configDir);
+  const rootLayout = normalizeRootLayoutPath(
+    configObject.rootLayout,
+    configDir,
+  );
   const configGlobalRules = {
     ...rootVarsToGlobalRules([
       ...(parsedThemes?.root ?? parsedThemes?.rootVars ?? []),
@@ -2143,6 +2180,7 @@ function loadInkConfig(
     layers,
     defaultUnit,
     include,
+    rootLayout,
     utilities: utilitiesParsed,
     configCss,
     utilityCss,
@@ -3322,6 +3360,20 @@ function isInDefaultTransformScope(
   return false;
 }
 
+function isConfiguredRootLayout(
+  id: string,
+  rootLayout: string | null,
+  viteRoot: string,
+): boolean {
+  if (!rootLayout) {
+    return false;
+  }
+
+  const modulePath = moduleIdToFilePath(id, viteRoot);
+  return modulePath !== null &&
+    getNodePath().normalize(modulePath) === rootLayout;
+}
+
 /** Options for {@link inkVite}. */
 export interface InkVitePluginOptions {
   /** Override the default scope (`<root>/{src,app}/**`) with a custom id matcher. */
@@ -3359,6 +3411,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     layers: [],
     defaultUnit: undefined,
     include: [],
+    rootLayout: null,
     utilities: {},
     configCss: "",
     utilityCss: "",
@@ -3669,11 +3722,19 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       if (!supportsTransform(normalizedId)) {
         return null;
       }
-      if (options.include && !options.include.test(normalizedId)) {
+      const isRootLayout = isConfiguredRootLayout(
+        normalizedId,
+        inkConfig.rootLayout,
+        viteRoot,
+      );
+      if (
+        options.include && !options.include.test(normalizedId) && !isRootLayout
+      ) {
         return null;
       }
       if (
         !options.include &&
+        !isRootLayout &&
         !isInDefaultTransformScope(
           normalizedId,
           viteRoot,
@@ -3698,6 +3759,19 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       const newInkDecls: AstNewInkDeclaration[] = transformTargets.newInkDecls;
       const calls = transformTargets.calls;
       if (calls.length === 0 && newInkDecls.length === 0) {
+        if (isRootLayout) {
+          const didVirtualCssChange = clearManagedModuleState(normalizedId);
+          managedModules.add(normalizedId);
+          nextCode = addVirtualImportToModule(nextCode, { isSvelte, isAstro });
+          if (didVirtualCssChange) {
+            invalidateVirtualModules();
+          }
+          return {
+            code: nextCode,
+            map: null,
+          };
+        }
+
         if (!isSvelte && !isAstro) {
           return null;
         }

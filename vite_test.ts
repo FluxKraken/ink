@@ -674,6 +674,109 @@ Deno.test("injects virtual stylesheet import in astro files that only import ink
   );
 });
 
+Deno.test("injects virtual stylesheet import in configured Svelte root layout", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { rootLayout: "./src/routes/+layout.svelte" };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `<slot />`,
+      `${root}/src/routes/+layout.svelte`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(
+      code.includes(
+        '<script>\nimport "virtual:ink/styles.css";\n</script>\n<slot />',
+      ),
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("injects virtual stylesheet import in configured TSX root layout", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { rootLayout: "./src/routes/__root.tsx" };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `export function Root() { return null; }\n`,
+      `${root}/src/routes/__root.tsx`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.startsWith('import "virtual:ink/styles.css";\n'));
+    assert(code.includes("export function Root()"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("injects virtual stylesheet import in configured Astro root layout", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/layouts`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { rootLayout: "./src/layouts/Base.astro" };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `---\nconst title = "Home";\n---\n<slot />`,
+      `${root}/src/layouts/Base.astro`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(
+      code.startsWith(
+        '---\nimport "virtual:ink/styles.css";\nconst title = "Home";',
+      ),
+    );
+    assert(code.includes("<slot />"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("injects virtual stylesheet import and extracts css for new ink() usage in astro", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
@@ -2177,6 +2280,7 @@ Deno.test("published types accept project config Fontsource fonts", () => {
     };
 
     export default defineInkConfig({
+      rootLayout: "./src/routes/+layout.svelte",
       import: [
         "./src/reset.css",
         { path: "./src/theme.css", layer: "theme" },

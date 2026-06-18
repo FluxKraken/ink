@@ -664,6 +664,7 @@ import "./src/global.css";
 
 export default defineInkConfig({
   include: ["./packages/ui"],
+  rootLayout: "./src/routes/+layout.svelte",
   import: [
     "./src/reset.css",
     { tailwind: Tailwind },
@@ -703,6 +704,8 @@ switching, or `themeMode: "custom"` with `ThemeAdvanced` when each theme should
 carry its own selector.
 
 The singular `import` field accepts the same inputs as `styles.import(...)`.
+Set `rootLayout` to your root Svelte, Astro, or TS/TSX layout module to have
+the shared stylesheet imported automatically.
 
 Then consume those aliases in your builder:
 
