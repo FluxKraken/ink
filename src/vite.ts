@@ -592,6 +592,90 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function appendConfigImportPath(
+  global: Record<string, unknown>,
+  entry: string | Record<string, unknown>,
+): void {
+  const current = global["@import"];
+  if (Array.isArray(current)) {
+    current.push(entry);
+    return;
+  }
+  global["@import"] = current === undefined ? [entry] : [current, entry];
+}
+
+function importEntriesFromConfigInput(input: unknown): unknown[] | null {
+  if (typeof input === "string" || isRecord(input)) {
+    return [input];
+  }
+  if (Array.isArray(input)) {
+    return input;
+  }
+  return null;
+}
+
+function parseConfigImportInput(
+  input: unknown,
+  options: { containers: Record<string, { type?: string; rule: string }> },
+): ReturnType<typeof parseInkConfig> {
+  const entries = importEntriesFromConfigInput(input);
+  if (!entries) {
+    return null;
+  }
+
+  const global: Record<string, unknown> = {};
+  const tailwindConfigs: unknown[] = [];
+
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      appendConfigImportPath(global, entry);
+      continue;
+    }
+
+    if (!isRecord(entry)) {
+      return null;
+    }
+
+    if ("tailwind" in entry) {
+      tailwindConfigs.push(entry.tailwind);
+      continue;
+    }
+
+    if ("path" in entry) {
+      appendConfigImportPath(global, entry);
+      continue;
+    }
+
+    if ("rules" in entry) {
+      const layer = typeof entry.layer === "string" ? entry.layer.trim() : "";
+      if (layer.length > 0) {
+        global[`@layer ${layer}`] = entry.rules;
+      } else if (isRecord(entry.rules)) {
+        Object.assign(global, entry.rules);
+      } else {
+        return null;
+      }
+      continue;
+    }
+
+    Object.assign(global, entry);
+  }
+
+  const configParts: Record<string, unknown> = {};
+  if (Object.keys(global).length > 0) {
+    configParts.global = global;
+  }
+  if (tailwindConfigs.length === 1) {
+    configParts.tailwind = tailwindConfigs[0];
+  } else if (tailwindConfigs.length > 1) {
+    configParts.tailwind = tailwindConfigs;
+  }
+
+  return Object.keys(configParts).length > 0
+    ? parseInkConfig(configParts, options)
+    : null;
+}
+
 function readMemberPath(
   value: unknown,
   members: readonly string[],
@@ -1959,12 +2043,19 @@ function loadInkConfig(
   const parsedUtilities = isRecord(configObject.utilities)
     ? parseInkConfig({ base: configObject.utilities }, { containers })
     : null;
+  const parsedImports = Object.prototype.hasOwnProperty.call(
+      configObject,
+      "import",
+    )
+    ? parseConfigImportInput(configObject.import, { containers })
+    : null;
   const utilityImports = parsedUtilities?.imports ?? [];
 
   const dedupedRawImports = Array.from(
     new Set([
       ...sideEffectImports,
       ...importsFromObject,
+      ...(parsedImports?.imports ?? []),
       ...utilityImports,
       ...configFonts.imports,
     ]),
@@ -1988,6 +2079,7 @@ function loadInkConfig(
       ...configFonts.root,
     ]),
     ...(parsedThemes?.global ?? {}),
+    ...(parsedImports?.global ?? {}),
   };
   const themeRules = Object.keys(configGlobalRules).length > 0
     ? toCssGlobalRules(configGlobalRules, {
@@ -1997,9 +2089,11 @@ function loadInkConfig(
     })
     : [];
   const layerOrderRule = toCssLayerOrderRule(layers);
-  const configCss = [layerOrderRule, ...themeRules].filter((part) =>
-    part.length > 0
-  ).join("\n");
+  const configCss = [
+    layerOrderRule,
+    ...themeRules,
+    ...(parsedImports?.tailwindCss ?? []),
+  ].filter((part) => part.length > 0).join("\n");
   const utilitiesParsed = parsedUtilities?.base ?? {};
 
   const utilityRules = Object.entries(utilitiesParsed)

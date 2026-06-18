@@ -271,6 +271,8 @@ export interface InkConfigContainer {
 export interface InkConfigFile {
   /** Additional directories whose modules should be transformed by the Vite plugin. */
   include?: string | readonly string[];
+  /** External CSS files, global rule objects, or Tailwind configs emitted into the virtual stylesheet. */
+  import?: ImportInput;
   /** CSS imports emitted into the virtual stylesheet. */
   imports?: readonly string[];
   /** Explicit CSS layer order emitted as `@layer a, b, c;`. */

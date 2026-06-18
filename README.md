@@ -659,10 +659,15 @@ Put project-wide config in the repository root:
 ```ts
 // ink.config.ts
 import { defineInkConfig } from "@kraken/ink";
+import Tailwind from "./src/tailwind";
 import "./src/global.css";
 
 export default defineInkConfig({
   include: ["./packages/ui"],
+  import: [
+    "./src/reset.css",
+    { tailwind: Tailwind },
+  ],
   imports: ["./src/theme.css"],
   fonts: [
     { name: "Bungee", varName: "display" },
@@ -696,6 +701,8 @@ export default defineInkConfig({
 `themeMode: "scope"` to keep the existing class/selector-based `@scope`
 switching, or `themeMode: "custom"` with `ThemeAdvanced` when each theme should
 carry its own selector.
+
+The singular `import` field accepts the same inputs as `styles.import(...)`.
 
 Then consume those aliases in your builder:
 

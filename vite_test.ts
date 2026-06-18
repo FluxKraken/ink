@@ -2158,9 +2158,31 @@ Deno.test("published types accept flexible font variation settings", () => {
 
 Deno.test("published types accept project config Fontsource fonts", () => {
   assertPackageTypesSucceed(`
-    import { defineCssConfig, defineInkConfig, type InkConfigFile } from "@kraken/ink";
+    import {
+      defineCssConfig,
+      defineInkConfig,
+      tw,
+      type InkConfigFile,
+      type TailwindConfigInput,
+    } from "@kraken/ink";
+
+    const tailwind: TailwindConfigInput = {
+      import: ["tailwindcss"],
+      plugin: ["@tailwindcss/typography"],
+      layer: {
+        base: {
+          body: tw("bg-background text-foreground"),
+        },
+      },
+    };
 
     export default defineInkConfig({
+      import: [
+        "./src/reset.css",
+        { path: "./src/theme.css", layer: "theme" },
+        { rules: { body: { margin: 0 } }, layer: "base" },
+        { tailwind },
+      ],
       fonts: [{ name: "Bungee", varName: "display" }],
       breakpoints: { md: "48rem" },
     });
@@ -4640,6 +4662,75 @@ Deno.test("loads ink.config.ts themes into the shared stylesheet", () => {
       css,
       /\.ink_[a-z0-9]+\{background-color:var\(--header-bg\)\}/,
     );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("loads builder-style imports from ink.config.ts", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib/styles`, { recursive: true });
+    Deno.writeTextFileSync(`${root}/src/reset.css`, "/* reset */\n");
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/tailwind.ts`,
+      `import { tw } from "@kraken/ink";\n` +
+        `export default {\n` +
+        `  import: ["tailwindcss"],\n` +
+        `  plugin: ["@tailwindcss/typography"],\n` +
+        `  themeInline: { "--font-sans": "'Inter Variable', sans-serif" },\n` +
+        `  root: { "--background": "oklch(1 0 0)" },\n` +
+        `  layer: { base: { body: tw("bg-background text-foreground") } },\n` +
+        `} as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { defineInkConfig } from "@kraken/ink";\n` +
+        `import Tailwind from "./src/lib/styles/tailwind";\n` +
+        `export default defineInkConfig({\n` +
+        `  import: [\n` +
+        `    "./src/reset.css",\n` +
+        `    { path: "./src/layered.css", layer: "theme" },\n` +
+        `    { rules: { body: { margin: 0 } }, layer: "base" },\n` +
+        `    { ".skip-link": { position: "absolute" } },\n` +
+        `    { tailwind: Tailwind },\n` +
+        `  ],\n` +
+        `});\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink from "@kraken/ink";\n` +
+      `export const styles = ink({ base: { page: { display: "grid" } } });`;
+    const transformed = transform(moduleCode, `${root}/src/app.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes('@import "/src/reset.css";'));
+    assert(css.includes('@import "/src/layered.css" layer(theme);'));
+    assert(css.includes('@import "tailwindcss";'));
+    assert(css.includes('@plugin "@tailwindcss/typography";'));
+    assert(
+      css.includes(
+        "@theme inline{--font-sans:'Inter Variable', sans-serif;}",
+      ),
+    );
+    assert(css.includes(":root{--background:oklch(1 0 0);}"));
+    assert(
+      css.includes(
+        "@layer base{body{@apply bg-background text-foreground;}}",
+      ),
+    );
+    assert(css.includes("@layer base{body{margin:0px}}"));
+    assert(css.includes(".skip-link{position:absolute}"));
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
