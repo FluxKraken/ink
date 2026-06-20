@@ -1625,6 +1625,42 @@ function createStaticModuleResolver(options: {
     return evalScope;
   }
 
+  function resolveNamespaceImport(
+    moduleId: string,
+    moduleInfo: ModuleStaticInfo,
+    tail: readonly string[],
+  ): unknown | null {
+    if (tail.length > 0) {
+      const [namespaceExport, ...namespaceTail] = tail;
+      const exportedLocalName =
+        moduleInfo.exportedConsts.get(namespaceExport) ?? namespaceExport;
+      const namespaceValue = resolveIdentifierInModule(
+        [exportedLocalName],
+        moduleId,
+      );
+      return namespaceTail.length > 0
+        ? readMemberPath(namespaceValue, namespaceTail)
+        : namespaceValue;
+    }
+
+    const namespaceValue: Record<string, unknown> = {};
+    for (const [exportedName, localName] of moduleInfo.exportedConsts) {
+      const exportedValue = resolveIdentifierInModule([localName], moduleId);
+      if (exportedValue !== null) {
+        namespaceValue[exportedName] = exportedValue;
+      }
+    }
+
+    if (moduleInfo.defaultExportExpression) {
+      const defaultValue = resolveIdentifierInModule(["default"], moduleId);
+      if (defaultValue !== null) {
+        namespaceValue.default = defaultValue;
+      }
+    }
+
+    return Object.keys(namespaceValue).length > 0 ? namespaceValue : null;
+  }
+
   function resolveIdentifierInModule(
     identifierPath: readonly string[],
     moduleId: string,
@@ -1704,19 +1740,11 @@ function createStaticModuleResolver(options: {
               const importedModuleInfo = getModuleInfo(resolvedImportFile);
               if (importedModuleInfo) {
                 if (binding.kind === "namespace") {
-                  if (tail.length > 0) {
-                    const [namespaceExport, ...namespaceTail] = tail;
-                    const exportedLocalName =
-                      importedModuleInfo.exportedConsts.get(namespaceExport) ??
-                        namespaceExport;
-                    const namespaceValue = resolveIdentifierInModule(
-                      [exportedLocalName],
-                      resolvedImportFile,
-                    );
-                    resolved = namespaceTail.length > 0
-                      ? readMemberPath(namespaceValue, namespaceTail)
-                      : namespaceValue;
-                  }
+                  resolved = resolveNamespaceImport(
+                    resolvedImportFile,
+                    importedModuleInfo,
+                    tail,
+                  );
                 } else {
                   const importedName = binding.kind === "default"
                     ? "default"

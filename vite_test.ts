@@ -4771,6 +4771,75 @@ Deno.test("loads ink.config.ts themes into the shared stylesheet", () => {
   }
 });
 
+Deno.test("loads ink.config.ts theme values computed through namespace helper barrels", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib/styles/utilities`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/utilities/color.ts`,
+      `export function hsl(h: number, s: number, l: number) {\n` +
+        `  return \`hsl(\${h} \${s}% \${l}%)\`;\n` +
+        `}\n` +
+        `export function linearGradient(input: { direction: string; from: string; to: string }) {\n` +
+        `  return \`linear-gradient(\${input.direction}, \${input.from}, \${input.to})\`;\n` +
+        `}\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/utilities/index.ts`,
+      `import * as Color from "./color";\n` +
+        `export default { Color } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/index.ts`,
+      `import Utilities from "./utilities";\n` +
+        `export { Utilities };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { defineInkConfig, Theme } from "@kraken/ink";\n` +
+        `import { Utilities } from "./src/lib/styles";\n` +
+        `const colors = {\n` +
+        `  blue: Utilities.Color.hsl(200, 100, 50),\n` +
+        `  yellow: Utilities.Color.hsl(60, 80, 80),\n` +
+        `};\n` +
+        `const gradients = {\n` +
+        `  background: Utilities.Color.linearGradient({\n` +
+        `    direction: "147deg",\n` +
+        `    from: colors.blue,\n` +
+        `    to: colors.yellow,\n` +
+        `  }),\n` +
+        `};\n` +
+        `const defaultTheme: Theme = new Theme({\n` +
+        `  site: {\n` +
+        `    background: gradients.background,\n` +
+        `    foreground: "black",\n` +
+        `  },\n` +
+        `});\n` +
+        `export default defineInkConfig({\n` +
+        `  themes: { default: defaultTheme },\n` +
+        `  themeMode: "scope",\n` +
+        `  resolution: "static",\n` +
+        `});\n`,
+    );
+
+    const plugin = inkVite();
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(
+      css.includes(
+        ":root{--site-background:linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%));--site-foreground:black}",
+      ),
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("loads builder-style imports from ink.config.ts", () => {
   const root = Deno.makeTempDirSync();
 
