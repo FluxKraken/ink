@@ -14,6 +14,7 @@ import {
   defineCssConfig,
   defineInkConfig,
   font,
+  image,
   Theme,
   ThemeAdvanced,
   tVar,
@@ -27,6 +28,7 @@ type Ink = typeof runtimeInk & {
   vite: typeof inkVite;
   cVar: typeof cVar;
   font: typeof font;
+  image: typeof image;
   Theme: typeof Theme;
   ThemeAdvanced: typeof ThemeAdvanced;
   tw: typeof tw;
@@ -44,6 +46,7 @@ const ink = Object.assign(runtimeInk, {
   vite: inkVite,
   cVar,
   font,
+  image,
   Theme,
   ThemeAdvanced,
   tw,
@@ -60,6 +63,8 @@ export { inkVite, inkVite as vite };
 export { cVar };
 /** Named export for creating quoted `font-family` lists. */
 export { font };
+/** Named export for marking image assets for `url(...)` serialization. */
+export { image };
 /** Named export for defining theme token maps. */
 export { Theme };
 /** Named export for defining themes with explicit selectors. */
@@ -88,6 +93,8 @@ export type { StyleDeclaration } from "./shared.js";
 export type { StyleSheet } from "./shared.js";
 /** CSS value accepted by style declarations. */
 export type { StyleValue } from "./shared.js";
+/** Explicit image asset value returned by `image(...)`. */
+export type { ImageValue } from "./shared.js";
 /** Object form accepted by `fontVariationSettings`. */
 export type { FontVariationSettingsObject } from "./shared.js";
 /** Fontsource font entry accepted by `fonts`. */

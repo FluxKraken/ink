@@ -24,6 +24,7 @@ import {
 import {
   cVar,
   font,
+  image,
   tailwindConfigToCss,
   Theme,
   ThemeAdvanced,
@@ -1410,6 +1411,35 @@ Deno.test("toCssDeclaration wraps imported image paths in url() for image proper
   );
 });
 
+Deno.test("image() explicitly wraps image values in custom properties", () => {
+  assertEquals(
+    toCssDeclaration("--site-background", image("/src/lib/assets/bg.png")),
+    '--site-background:url("/src/lib/assets/bg.png")',
+  );
+  assertEquals(
+    toCssDeclaration("backgroundImage", image("./bg.webp?url")),
+    'background-image:url("./bg.webp?url")',
+  );
+
+  const theme = new Theme({
+    site: {
+      background: image("/src/lib/assets/bg.png"),
+    },
+  });
+  assertEquals(
+    toCssGlobalRules({
+      ":root": theme.vars,
+      body: {
+        backgroundImage: tVar.site.background,
+      },
+    }),
+    [
+      ':root{--site-background:url("/src/lib/assets/bg.png")}',
+      "body{background-image:var(--site-background)}",
+    ],
+  );
+});
+
 Deno.test("toCssRules supports nested selectors and nested @media/@container blocks", () => {
   const rules = toCssRules("test", {
     fontSize: "1.25rem",
@@ -1691,6 +1721,32 @@ Deno.test("parser supports font() helper values", () => {
   assertEquals(parsed.root, [{
     "--font-display": `"Inter Variable", system-ui, sans-serif`,
   }]);
+});
+
+Deno.test("parser supports image() helper values in themes", () => {
+  const parsed = parseInkCallArguments(`{
+    themes: {
+      default: new Theme({
+        site: {
+          background: image("/src/lib/assets/bg.png")
+        }
+      })
+    },
+    base: {
+      hero: {
+        backgroundImage: tVar.site.background
+      }
+    }
+  }`);
+
+  assert(parsed !== null);
+  assertEquals(parsed.root, [{
+    "--site-background": image("/src/lib/assets/bg.png"),
+  }]);
+  assertEquals(
+    styleDeclarationOf(parsed.base.hero).backgroundImage,
+    cVar("--site-background"),
+  );
 });
 
 Deno.test("parser supports @apply merge lists with local declarations", () => {
@@ -2218,7 +2274,7 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
 
 Deno.test("published types accept nested themes and nested tVar references", () => {
   assertPackageTypesSucceed(`
-    import ink, { Theme, tVar, type ThemeTokenInput } from "@kraken/ink";
+    import ink, { image, Theme, tVar, type ThemeTokenInput } from "@kraken/ink";
 
     const defaultTokens: ThemeTokenInput = {
       cornerRadius: "0.5rem",
@@ -2233,6 +2289,7 @@ Deno.test("published types accept nested themes and nested tVar references", () 
       },
       site: {
         width: "70rem",
+        background: image("/src/lib/assets/bg.png"),
       },
     };
     const responsiveWidth = (width: string) => \`min(\${width}, 100%)\`;
@@ -2248,6 +2305,10 @@ Deno.test("published types accept nested themes and nested tVar references", () 
         fontSize: tVar.fontSizes.medium,
         borderRadius: tVar.cornerRadius,
         width: responsiveWidth(tVar.site.width),
+        backgroundImage: tVar.site.background,
+      },
+      hero: {
+        backgroundImage: ink.image("/src/lib/assets/hero.png"),
       },
     };
   `);
@@ -4799,6 +4860,73 @@ Deno.test("loads ink.config.ts themes into the shared stylesheet", () => {
     assertMatch(
       css,
       /\.ink_[a-z0-9]+\{background-color:var\(--header-bg\)\}/,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("loads image() theme values from imported ink.config.ts theme modules", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib/assets`, { recursive: true });
+    Deno.mkdirSync(`${root}/src/lib/styles`, { recursive: true });
+    Deno.writeTextFileSync(`${root}/src/lib/assets/bg.png`, "png");
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/general.ts`,
+      `import { tVar } from "@kraken/ink";\n` +
+        `export default {\n` +
+        `  body: {\n` +
+        `    backgroundImage: tVar.site.background,\n` +
+        `  },\n` +
+        `} as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/index.ts`,
+      `import { image, Theme } from "@kraken/ink";\n` +
+        `import General from "./general";\n` +
+        `import bgImage from "../assets/bg.png";\n` +
+        `const flux = new Theme({\n` +
+        `  site: {\n` +
+        `    background: image(bgImage),\n` +
+        `  },\n` +
+        `});\n` +
+        `export default {\n` +
+        `  themes: { default: flux },\n` +
+        `  imports: { General },\n` +
+        `} as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { defineInkConfig } from "@kraken/ink";\n` +
+        `import Flux from "./src/lib/styles";\n` +
+        `export default defineInkConfig({\n` +
+        `  themes: Flux.themes,\n` +
+        `  import: [{ rules: Flux.imports.General, layer: "general" }],\n` +
+        `  themeMode: "scope",\n` +
+        `  resolution: "static",\n` +
+        `});\n`,
+    );
+
+    const plugin = inkVite();
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(
+      css.includes(
+        ':root{--site-background:url("/src/lib/assets/bg.png")}',
+      ),
+      css,
+    );
+    assert(
+      css.includes(
+        "@layer general{body{background-image:var(--site-background)}}",
+      ),
+      css,
     );
   } finally {
     Deno.removeSync(root, { recursive: true });

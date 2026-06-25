@@ -3,8 +3,10 @@ import {
   evalThemeTemplate,
   font,
   fontsToConfig,
+  image,
   isCssVarRef,
   isFontTokenProperty,
+  isImageValue,
   isTailwindClassValue,
   isTheme,
   isThemeAdvanced,
@@ -98,6 +100,11 @@ type FontCallReference = {
   families: ParsedArray;
 };
 
+type ImageCallReference = {
+  kind: "image-call";
+  src: ParsedValue;
+};
+
 type TailwindCallReference = {
   kind: "tailwind-call";
   classes: ParsedValue;
@@ -122,6 +129,7 @@ type ParsedValue =
   | TemplateLiteralReference
   | ThemeConstructorReference
   | FontCallReference
+  | ImageCallReference
   | TailwindCallReference
   | ParsedObject
   | ParsedArray;
@@ -393,6 +401,31 @@ function parseFontCall(
   }, cursor];
 }
 
+function parseImageCall(
+  input: string,
+  index: number,
+): [ImageCallReference, number] {
+  let cursor = skipWhitespace(input, index);
+  if (input[cursor] !== "(") {
+    throw new Error("Expected '(' after image");
+  }
+
+  cursor = skipWhitespace(input, cursor + 1);
+  const [argumentValue, argumentEnd] = parseValue(input, cursor);
+
+  cursor = parseCallTerminator(
+    input,
+    argumentEnd,
+    "image() accepts a single asset path argument",
+    "Expected ')' after image() call",
+  );
+
+  return [{
+    kind: "image-call",
+    src: argumentValue,
+  }, cursor];
+}
+
 function parseTailwindCall(
   input: string,
   index: number,
@@ -614,6 +647,10 @@ function parseValue(input: string, index: number): [ParsedValue, number] {
       return parseFontCall(input, identifierEnd);
     }
 
+    if (identifier === "image") {
+      return parseImageCall(input, identifierEnd);
+    }
+
     if (identifier === "tw") {
       return parseTailwindCall(input, identifierEnd);
     }
@@ -744,6 +781,14 @@ function isFontCallReference(value: unknown): value is FontCallReference {
     isPlainObject(value) &&
     value.kind === "font-call" &&
     Array.isArray(value.families)
+  );
+}
+
+function isImageCallReference(value: unknown): value is ImageCallReference {
+  return (
+    isPlainObject(value) &&
+    value.kind === "image-call" &&
+    "src" in value
   );
 }
 
@@ -944,19 +989,23 @@ function normalizeStyleLeafValue(value: unknown): StyleValue | null {
   }
 
   if (
-    typeof value === "string" || typeof value === "number" || isCssVarRef(value)
+    typeof value === "string" || typeof value === "number" ||
+    isCssVarRef(value) || isImageValue(value)
   ) {
     return value;
   }
 
   if (Array.isArray(value)) {
-    const normalizedArray: Array<string | number | ReturnType<typeof cVar>> =
-      [];
+    const normalizedArray: Array<
+      string | number | ReturnType<typeof cVar> | ReturnType<typeof image>
+    > = [];
     for (const entry of value) {
       const normalizedEntry = normalizeStyleLeafValue(entry);
       if (
         normalizedEntry === null || Array.isArray(normalizedEntry) ||
-        typeof normalizedEntry === "object" && !isCssVarRef(normalizedEntry)
+        typeof normalizedEntry === "object" &&
+          !isCssVarRef(normalizedEntry) &&
+          !isImageValue(normalizedEntry)
       ) {
         return null;
       }
@@ -973,6 +1022,7 @@ function isPrimitiveStyleLeaf(value: unknown): boolean {
     typeof value === "string" ||
     typeof value === "number" ||
     isCssVarRef(value) ||
+    isImageValue(value) ||
     identifierReferenceToCssLiteral(value) !== null ||
     identifierReferenceToThemeVar(value) !== null ||
     identifierReferenceToFontVar(value) !== null
@@ -992,6 +1042,7 @@ function isStyleDeclarationObject(value: unknown): value is StyleDeclaration {
   if (
     !isPlainObject(value) ||
     isCssVarRef(value) ||
+    isImageValue(value) ||
     isTailwindClassValue(value) ||
     isResolvedStyleDefinition(value)
   ) {
@@ -1203,7 +1254,7 @@ function normalizeStyleDeclaration(
     return null;
   }
 
-  if (!isPlainObject(value) || isCssVarRef(value)) {
+  if (!isPlainObject(value) || isCssVarRef(value) || isImageValue(value)) {
     return null;
   }
 
@@ -2155,6 +2206,22 @@ function resolveParsedValue(
     }
   }
 
+  if (isImageCallReference(value)) {
+    const resolvedSrc = resolveParsedValue(
+      value.src,
+      resolveIdentifier,
+      keepUnresolvedIdentifiers,
+    );
+    if (resolvedSrc === UNRESOLVED || typeof resolvedSrc !== "string") {
+      return keepUnresolvedIdentifiers ? value : UNRESOLVED;
+    }
+    try {
+      return image(resolvedSrc);
+    } catch {
+      return keepUnresolvedIdentifiers ? value : UNRESOLVED;
+    }
+  }
+
   if (isTailwindCallReference(value)) {
     const resolvedClasses = resolveParsedValue(
       value.classes,
@@ -2234,7 +2301,8 @@ function parseExpression(source: string): ParsedValue | null {
 
 /**
  * Parse a limited static expression used by ink extraction:
- * objects, arrays, strings, numbers, identifiers, and `cVar(...)`.
+ * objects, arrays, strings, numbers, identifiers, and helper calls like
+ * `cVar(...)` and `image(...)`.
  */
 export function parseStaticExpression(
   source: string,

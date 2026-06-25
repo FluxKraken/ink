@@ -10,6 +10,8 @@ export { inkVite, vite } from "./src/index.ts";
 export { cVar } from "./src/index.ts";
 /** Named export for creating quoted `font-family` lists. */
 export { font } from "./src/index.ts";
+/** Named export for marking image assets for `url(...)` serialization. */
+export { image } from "./src/index.ts";
 /** Named export for defining theme token maps. */
 export { Theme } from "./src/index.ts";
 /** Named export for defining themes with explicit selectors. */
@@ -40,6 +42,8 @@ export type { InkSimpleStyleAccessor } from "./src/index.ts";
 export type { StyleSheet } from "./src/index.ts";
 /** CSS value accepted by style declarations. */
 export type { StyleValue } from "./src/index.ts";
+/** Explicit image asset value returned by `image(...)`. */
+export type { ImageValue } from "./src/index.ts";
 /** Object form accepted by `fontVariationSettings`. */
 export type { FontVariationSettingsObject } from "./src/index.ts";
 /** Fontsource font entry accepted by `fonts`. */

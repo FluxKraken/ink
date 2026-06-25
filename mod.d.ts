@@ -4,13 +4,15 @@ import {
   CssVarRef,
   defineCssConfig,
   defineInkConfig,
-  FontVariationSettingsObject,
   font,
   FontHelper,
   FontSourceInput,
+  FontVariationSettingsObject,
+  image,
+  ImageValue,
+  ImportedThemesInput,
   InkConfigFile,
   InkResolution,
-  ImportedThemesInput,
   LayeredApplyInput,
   PrimitiveStyleValue,
   SetInput,
@@ -223,6 +225,8 @@ export type { InkSimpleStyleAccessor };
 export type { StyleSheet };
 /** Re-exported style value type. */
 export type { StyleValue };
+/** Explicit image asset value returned by `image(...)`. */
+export type { ImageValue };
 /** Object form accepted by `fontVariationSettings`. */
 export type { FontVariationSettingsObject };
 /** Fontsource font entry accepted by `fonts`. */
@@ -293,6 +297,8 @@ export interface Ink {
   cVar: (name: string, fallback?: PrimitiveStyleValue) => CssVarRef;
   /** Create a quoted `font-family` list or read font tokens. */
   font: typeof font;
+  /** Mark an image asset for `url(...)` serialization. */
+  image: typeof image;
   /** Theme constructor. */
   Theme: typeof Theme;
   /** Theme constructor with an explicit selector. */
@@ -318,6 +324,8 @@ export const vite: (options?: InkVitePluginOptions) => any;
 export const cVar: (name: string, fallback?: PrimitiveStyleValue) => CssVarRef;
 /** Named export for creating quoted `font-family` lists and reading font tokens. */
 export { font };
+/** Named export for marking image assets for `url(...)` serialization. */
+export { image };
 /** Named export for defining theme token maps. */
 export { Theme };
 /** Named export for defining themes with explicit selectors. */

@@ -136,8 +136,9 @@ styles.appShell({ theme: "light" });
 ## Imported images and multi-value properties
 
 Imported image assets can be assigned directly to image-capable CSS properties.
-Array values become either space-delimited or comma-delimited CSS depending on
-the property.
+Use `image(...)` when storing an imported image in a context-free value such as
+a theme variable. Array values become either space-delimited or comma-delimited
+CSS depending on the property.
 
 ```ts
 import ink, { font } from "@kraken/ink";

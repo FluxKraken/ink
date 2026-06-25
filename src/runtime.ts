@@ -5,6 +5,7 @@ import {
   fontsToConfig,
   ImportedThemesInput,
   isCssVarRef,
+  isImageValue,
   isTailwindClassValue,
   mergeTailwindClassNames,
   prefixTailwindVariantClasses,
@@ -485,6 +486,7 @@ function isStyleDeclarationObject(value: unknown): value is StyleDeclaration {
     value === null ||
     Array.isArray(value) ||
     isCssVarRef(value) ||
+    isImageValue(value) ||
     isTailwindClassValue(value) ||
     isResolvedStyleDefinition(value)
   ) {
@@ -499,6 +501,7 @@ function isStyleDeclarationObject(value: unknown): value is StyleDeclaration {
       typeof nested !== "string" &&
       typeof nested !== "number" &&
       !isCssVarRef(nested) &&
+      !isImageValue(nested) &&
       !isStyleDeclarationObject(nested)
     ) {
       return false;
@@ -510,7 +513,7 @@ function isStyleDeclarationObject(value: unknown): value is StyleDeclaration {
 
 function isPrimitiveStyleLeaf(value: unknown): boolean {
   return typeof value === "string" || typeof value === "number" ||
-    isCssVarRef(value);
+    isCssVarRef(value) || isImageValue(value);
 }
 
 function isStyleLeafArray(value: unknown): value is readonly StyleValue[] {
@@ -649,7 +652,8 @@ function normalizeStyleDeclarationInput(
       isTailwindClassValue(value) ||
       (typeof value === "object" &&
         value !== null &&
-        !isCssVarRef(value))
+        !isCssVarRef(value) &&
+        !isImageValue(value))
     ) {
       const nested = normalizeStyleDeclarationInput(
         value as StyleDeclarationInput,
@@ -746,6 +750,7 @@ function normalizeApplyInput(
     value !== null &&
     !Array.isArray(value) &&
     !isCssVarRef(value) &&
+    !isImageValue(value) &&
     "rules" in value
   ) {
     const layeredApply = value as { rules: unknown; layer?: unknown };
@@ -915,7 +920,7 @@ function resolveStyleClassValue(
 
 function isInlineStyleValue(value: unknown): value is StyleValue {
   return typeof value === "string" || typeof value === "number" ||
-    isCssVarRef(value) || isStyleLeafArray(value);
+    isCssVarRef(value) || isImageValue(value) || isStyleLeafArray(value);
 }
 
 function mergeInlineDeclarations(

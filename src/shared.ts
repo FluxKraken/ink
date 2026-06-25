@@ -59,11 +59,18 @@ export interface CssVarRef {
   /** Optional fallback value used in `var()` output. */
   fallback?: PrimitiveStyleValue;
 }
+/** Explicit image asset value created by {@link image}. */
+export interface ImageValue {
+  /** Discriminator for {@link ImageValue} values. */
+  kind: "ink-image";
+  /** Raw image asset path or URL before `url(...)` formatting. */
+  src: string;
+}
+type StylePrimitiveValue = PrimitiveStyleValue | CssVarRef | ImageValue;
 /** CSS value accepted by style declarations. */
 export type StyleValue =
-  | PrimitiveStyleValue
-  | CssVarRef
-  | readonly (PrimitiveStyleValue | CssVarRef)[];
+  | StylePrimitiveValue
+  | readonly StylePrimitiveValue[];
 /** CSS value accepted specifically by `fontVariationSettings`. */
 export type FontVariationSettingsValue =
   | StyleValue
@@ -338,9 +345,9 @@ export interface CssSerializationOptions {
 
 function isPrimitiveThemeValue(
   value: unknown,
-): value is PrimitiveStyleValue | CssVarRef {
+): value is StylePrimitiveValue {
   return typeof value === "string" || typeof value === "number" ||
-    isCssVarRef(value);
+    isCssVarRef(value) || isImageValue(value);
 }
 
 function isThemeStyleValue(value: unknown): value is StyleValue {
@@ -389,7 +396,8 @@ function isThemeTokenGroup(value: unknown): value is ThemeTokenInput {
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
-    !isCssVarRef(value)
+    !isCssVarRef(value) &&
+    !isImageValue(value)
   );
 }
 
@@ -412,7 +420,7 @@ function normalizeThemeTokens(
     throw new Error(
       `Theme token "${
         tokenPath.join(".")
-      }" must be a string, number, ink variable reference, array of those values, or a nested token group.`,
+      }" must be a string, number, ink variable reference, image() value, array of those values, or a nested token group.`,
     );
   }
 
@@ -771,11 +779,7 @@ const RAW_CSS_IMAGE_PREFIXES = [
   "var(",
 ];
 
-function shouldAutoWrapImageValue(property: string, value: string): boolean {
-  if (!AUTO_URL_IMAGE_PROPERTIES.has(property)) {
-    return false;
-  }
-
+function isAutoWrappableImageValue(value: string): boolean {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
     return false;
@@ -797,6 +801,11 @@ function shouldAutoWrapImageValue(property: string, value: string): boolean {
   }
 
   return IMAGE_ASSET_VALUE_PATTERN.test(trimmed);
+}
+
+function shouldAutoWrapImageValue(property: string, value: string): boolean {
+  return AUTO_URL_IMAGE_PROPERTIES.has(property) &&
+    isAutoWrappableImageValue(value);
 }
 
 function formatCssImageUrl(value: string): string {
@@ -1245,7 +1254,8 @@ function isNestedStyleDeclaration(
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
-    !isCssVarRef(value)
+    !isCssVarRef(value) &&
+    !isImageValue(value)
   );
 }
 
@@ -1268,6 +1278,7 @@ function isFontVariationSettingsObject(
     value !== null &&
     !Array.isArray(value) &&
     !isCssVarRef(value) &&
+    !isImageValue(value) &&
     Object.entries(value).every(([axis, axisValue]) =>
       axis.trim().length > 0 && isFontVariationAxisValue(axisValue)
     )
@@ -1415,7 +1426,7 @@ function isScopeDirectiveDeclaration(
   value: unknown,
 ): value is StyleDeclaration {
   return typeof value === "object" && value !== null && !Array.isArray(value) &&
-    !isCssVarRef(value);
+    !isCssVarRef(value) && !isImageValue(value);
 }
 
 function nestSelector(parentSelector: string, childSelector: string): string {
@@ -1707,7 +1718,7 @@ export function toCssLayerOrderRule(
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) &&
-    !isCssVarRef(value);
+    !isCssVarRef(value) && !isImageValue(value);
 }
 
 function toQuotedImportSpecifier(path: string): string {
@@ -2058,6 +2069,40 @@ export function cVar(name: string, fallback?: PrimitiveStyleValue): CssVarRef {
 }
 
 /**
+ * Mark an image asset path or URL for `url(...)` serialization.
+ * Use this when storing imported images in context-free values such as themes.
+ */
+export function image(src: string): ImageValue {
+  if (typeof src !== "string") {
+    throw new Error("image() expects a string asset path or URL.");
+  }
+
+  const trimmed = src.trim();
+  if (trimmed.length === 0) {
+    throw new Error("image() expects a non-empty asset path or URL.");
+  }
+
+  const value = {
+    kind: "ink-image",
+    src: trimmed,
+  } as ImageValue;
+
+  Object.defineProperties(value, {
+    [Symbol.toPrimitive]: {
+      value: () => formatCssImageUrl(value.src),
+    },
+    toString: {
+      value: () => formatCssImageUrl(value.src),
+    },
+    valueOf: {
+      value: () => formatCssImageUrl(value.src),
+    },
+  });
+
+  return value;
+}
+
+/**
  * Type guard for {@link CssVarRef} values.
  * @param value Unknown value to test.
  */
@@ -2067,6 +2112,18 @@ export function isCssVarRef(value: unknown): value is CssVarRef {
     value !== null &&
     "kind" in value &&
     (value as CssVarRef).kind === "ink-var"
+  );
+}
+
+/** Type guard for {@link ImageValue} values. */
+export function isImageValue(value: unknown): value is ImageValue {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    (value as ImageValue).kind === "ink-image" &&
+    "src" in value &&
+    typeof (value as ImageValue).src === "string"
   );
 }
 
@@ -2232,7 +2289,7 @@ function isTransitionTimingToken(value: string): boolean {
 }
 
 function shouldUseSpaceDelimitedTransitionValue(
-  value: readonly (PrimitiveStyleValue | CssVarRef)[],
+  value: readonly StylePrimitiveValue[],
 ): boolean {
   if (value.length < 2) {
     return false;
@@ -2247,6 +2304,10 @@ function shouldUseSpaceDelimitedTransitionValue(
     if (isCssVarRef(entry)) {
       hasTimingToken = true;
       continue;
+    }
+
+    if (isImageValue(entry)) {
+      return false;
     }
 
     if (/\s|,/.test(entry)) {
@@ -2289,6 +2350,10 @@ function formatStyleValue(
     return `var(${value.name}, ${
       formatPrimitiveStyleValue(property, value.fallback, options)
     })`;
+  }
+
+  if (isImageValue(value)) {
+    return formatCssImageUrl(value.src);
   }
 
   return formatPrimitiveStyleValue(

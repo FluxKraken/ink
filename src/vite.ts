@@ -16,7 +16,9 @@ import {
   defineInkConfig,
   font,
   fontsToConfig,
+  image,
   isCssVarRef,
+  isImageValue,
   mergeTailwindClassNames,
   rootVarsToGlobalRules,
   type StyleDeclaration,
@@ -535,6 +537,7 @@ function getStaticInkDefaultExport(): Record<string, unknown> {
       defineCssConfig,
       defineInkConfig,
       font,
+      image,
       Theme,
       ThemeAdvanced,
       tw,
@@ -552,6 +555,7 @@ function getStaticInkNamespace(): Record<string, unknown> {
     defineCssConfig,
     defineInkConfig,
     font,
+    image,
     Theme,
     ThemeAdvanced,
     tw,
@@ -2044,7 +2048,8 @@ function hasStyleDeclarations(declaration: StyleDeclaration): boolean {
       typeof value === "string" ||
       typeof value === "number" ||
       Array.isArray(value) ||
-      isCssVarRef(value)
+      isCssVarRef(value) ||
+      isImageValue(value)
     ) {
       return true;
     }
