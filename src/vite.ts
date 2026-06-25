@@ -689,10 +689,21 @@ function readMemberPath(
       return null;
     }
     const record = current as Record<string, unknown>;
-    if (!(member in record)) {
+    if (member in record) {
+      current = record[member];
+      continue;
+    }
+
+    let next: unknown;
+    try {
+      next = record[member];
+    } catch {
       return null;
     }
-    current = record[member];
+    if (next === undefined) {
+      return null;
+    }
+    current = next;
   }
   return current;
 }
@@ -1328,7 +1339,10 @@ function normalizeIncludePaths(value: unknown, baseDir: string): string[] {
   return Array.from(new Set(normalized));
 }
 
-function normalizeRootLayoutPath(value: unknown, baseDir: string): string | null {
+function normalizeRootLayoutPath(
+  value: unknown,
+  baseDir: string,
+): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -1560,6 +1574,7 @@ function createStaticModuleResolver(options: {
   const moduleInfoCache = options.moduleInfoCache ?? new Map();
   const constValueCache = new Map<string, unknown | null>();
   const resolving = new Set<string>();
+  const resolvingNamespaces = new Set<string>();
 
   function getModuleInfo(moduleId: string): ModuleStaticInfo | null {
     const cached = moduleInfoCache.get(moduleId);
@@ -1625,6 +1640,78 @@ function createStaticModuleResolver(options: {
     return evalScope;
   }
 
+  function resolveReExportBinding(
+    moduleId: string,
+    binding: ImportBinding,
+  ): unknown | null {
+    const resolvedImportFile = options.resolveImportFile(
+      moduleId,
+      binding.source,
+    );
+    if (!resolvedImportFile) {
+      return null;
+    }
+
+    const importedModuleInfo = getModuleInfo(resolvedImportFile);
+    if (!importedModuleInfo) {
+      return null;
+    }
+
+    if (binding.kind === "namespace") {
+      return resolveNamespaceImport(resolvedImportFile, importedModuleInfo, []);
+    }
+
+    const importedName = binding.kind === "default"
+      ? "default"
+      : binding.imported;
+    return resolveExportedValue(
+      resolvedImportFile,
+      importedModuleInfo,
+      importedName,
+    );
+  }
+
+  function resolveExportedValue(
+    moduleId: string,
+    moduleInfo: ModuleStaticInfo,
+    exportedName: string,
+  ): unknown | null {
+    const exportedLocalName = moduleInfo.exportedConsts.get(exportedName);
+    if (exportedLocalName !== undefined) {
+      return resolveIdentifierInModule([exportedLocalName], moduleId);
+    }
+
+    if (exportedName === "default" && moduleInfo.defaultExportExpression) {
+      return resolveIdentifierInModule(["default"], moduleId);
+    }
+
+    const reExport = moduleInfo.reExports.get(exportedName);
+    if (reExport) {
+      return resolveReExportBinding(moduleId, reExport);
+    }
+
+    for (const source of moduleInfo.exportAllSources) {
+      const resolvedImportFile = options.resolveImportFile(moduleId, source);
+      if (!resolvedImportFile) {
+        continue;
+      }
+      const importedModuleInfo = getModuleInfo(resolvedImportFile);
+      if (!importedModuleInfo) {
+        continue;
+      }
+      const exportedValue = resolveExportedValue(
+        resolvedImportFile,
+        importedModuleInfo,
+        exportedName,
+      );
+      if (exportedValue !== null) {
+        return exportedValue;
+      }
+    }
+
+    return null;
+  }
+
   function resolveNamespaceImport(
     moduleId: string,
     moduleInfo: ModuleStaticInfo,
@@ -1632,32 +1719,75 @@ function createStaticModuleResolver(options: {
   ): unknown | null {
     if (tail.length > 0) {
       const [namespaceExport, ...namespaceTail] = tail;
-      const exportedLocalName =
-        moduleInfo.exportedConsts.get(namespaceExport) ?? namespaceExport;
-      const namespaceValue = resolveIdentifierInModule(
-        [exportedLocalName],
+      const namespaceValue = resolveExportedValue(
         moduleId,
+        moduleInfo,
+        namespaceExport,
       );
       return namespaceTail.length > 0
         ? readMemberPath(namespaceValue, namespaceTail)
         : namespaceValue;
     }
 
+    if (resolvingNamespaces.has(moduleId)) {
+      return null;
+    }
+    resolvingNamespaces.add(moduleId);
+
     const namespaceValue: Record<string, unknown> = {};
-    for (const [exportedName, localName] of moduleInfo.exportedConsts) {
-      const exportedValue = resolveIdentifierInModule([localName], moduleId);
+
+    const addNamespaceExport = (exportedName: string): void => {
+      const exportedValue = resolveExportedValue(
+        moduleId,
+        moduleInfo,
+        exportedName,
+      );
       if (exportedValue !== null) {
         namespaceValue[exportedName] = exportedValue;
       }
+    };
+
+    for (const exportedName of moduleInfo.exportedConsts.keys()) {
+      addNamespaceExport(exportedName);
+    }
+
+    for (const exportedName of moduleInfo.reExports.keys()) {
+      addNamespaceExport(exportedName);
     }
 
     if (moduleInfo.defaultExportExpression) {
-      const defaultValue = resolveIdentifierInModule(["default"], moduleId);
-      if (defaultValue !== null) {
-        namespaceValue.default = defaultValue;
+      addNamespaceExport("default");
+    }
+
+    for (const source of moduleInfo.exportAllSources) {
+      const resolvedImportFile = options.resolveImportFile(moduleId, source);
+      if (!resolvedImportFile) {
+        continue;
+      }
+      const importedModuleInfo = getModuleInfo(resolvedImportFile);
+      if (!importedModuleInfo) {
+        continue;
+      }
+      const exportedNamespace = resolveNamespaceImport(
+        resolvedImportFile,
+        importedModuleInfo,
+        [],
+      );
+      if (!isRecord(exportedNamespace)) {
+        continue;
+      }
+      for (
+        const [exportedName, exportedValue] of Object.entries(
+          exportedNamespace,
+        )
+      ) {
+        if (exportedName !== "default" && !(exportedName in namespaceValue)) {
+          namespaceValue[exportedName] = exportedValue;
+        }
       }
     }
 
+    resolvingNamespaces.delete(moduleId);
     return Object.keys(namespaceValue).length > 0 ? namespaceValue : null;
   }
 
@@ -1749,13 +1879,10 @@ function createStaticModuleResolver(options: {
                   const importedName = binding.kind === "default"
                     ? "default"
                     : binding.imported;
-                  const exportedLocalName = importedName === "default"
-                    ? null
-                    : (importedModuleInfo.exportedConsts.get(importedName) ??
-                      importedName);
-                  const importedValue = resolveIdentifierInModule(
-                    exportedLocalName ? [exportedLocalName] : ["default"],
+                  const importedValue = resolveExportedValue(
                     resolvedImportFile,
+                    importedModuleInfo,
+                    importedName,
                   );
                   resolved = tail.length > 0
                     ? readMemberPath(importedValue, tail)
@@ -1764,6 +1891,65 @@ function createStaticModuleResolver(options: {
               }
             }
           }
+        }
+      }
+
+      if (
+        resolved === null && head !== "default" &&
+        moduleInfo.reExports.has(head)
+      ) {
+        const reExportedValue = resolveExportedValue(
+          moduleId,
+          moduleInfo,
+          head,
+        );
+        if (reExportedValue !== null) {
+          resolved = tail.length > 0
+            ? readMemberPath(reExportedValue, tail)
+            : reExportedValue;
+        }
+      }
+
+      if (resolved === null && head !== "default") {
+        for (const source of moduleInfo.exportAllSources) {
+          const resolvedImportFile = options.resolveImportFile(
+            moduleId,
+            source,
+          );
+          if (!resolvedImportFile) {
+            continue;
+          }
+          const importedModuleInfo = getModuleInfo(resolvedImportFile);
+          if (!importedModuleInfo) {
+            continue;
+          }
+          const exportedValue = resolveExportedValue(
+            resolvedImportFile,
+            importedModuleInfo,
+            head,
+          );
+          if (exportedValue !== null) {
+            resolved = tail.length > 0
+              ? readMemberPath(exportedValue, tail)
+              : exportedValue;
+            break;
+          }
+        }
+      }
+
+      if (
+        resolved === null && head === "default" &&
+        moduleInfo.reExports.has("default")
+      ) {
+        const reExportedDefault = resolveExportedValue(
+          moduleId,
+          moduleInfo,
+          "default",
+        );
+        if (reExportedDefault !== null) {
+          resolved = tail.length > 0
+            ? readMemberPath(reExportedDefault, tail)
+            : reExportedDefault;
         }
       }
 

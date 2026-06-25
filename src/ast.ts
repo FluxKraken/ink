@@ -23,6 +23,8 @@ export type ModuleStaticInfo = {
   >;
   functionDeclarations: Map<string, string>;
   exportedConsts: Map<string, string>;
+  reExports: Map<string, ImportBinding>;
+  exportAllSources: string[];
   defaultExportExpression: string | null;
 };
 
@@ -226,6 +228,8 @@ export function parseModuleStaticInfo(
   >();
   const functionDeclarations = new Map<string, string>();
   const exportedConsts = new Map<string, string>();
+  const reExports = new Map<string, ImportBinding>();
+  const exportAllSources: string[] = [];
   let defaultExportExpression: string | null = null;
 
   if (!typescript) {
@@ -234,6 +238,8 @@ export function parseModuleStaticInfo(
       constInitializers,
       functionDeclarations,
       exportedConsts,
+      reExports,
+      exportAllSources,
       defaultExportExpression,
     };
   }
@@ -306,27 +312,61 @@ export function parseModuleStaticInfo(
     if (kind === syntaxKind.ExportDeclaration) {
       const exportNode = node as {
         isTypeOnly?: boolean;
-        exportClause?: { kind?: number; elements?: unknown[] };
+        exportClause?: { kind?: number; elements?: unknown[]; name?: unknown };
+        moduleSpecifier?: unknown;
       };
-      if (
-        exportNode.isTypeOnly === true ||
-        exportNode.exportClause?.kind !== syntaxKind.NamedExports
-      ) {
+      if (exportNode.isTypeOnly === true) {
         return;
       }
 
-      for (const element of exportNode.exportClause.elements ?? []) {
-        if (isTypeOnlyNode(element)) {
-          continue;
+      const source = astStringLiteralText(exportNode.moduleSpecifier);
+      if (source) {
+        if (!exportNode.exportClause) {
+          exportAllSources.push(source);
+          return;
         }
-        const exported = astIdentifierText(
-          (element as { name?: unknown }).name,
-        );
-        const local = astIdentifierText(
-          (element as { propertyName?: unknown }).propertyName,
-        ) ?? exported;
-        if (exported && local) {
-          exportedConsts.set(exported, local);
+
+        if (exportNode.exportClause.kind === syntaxKind.NamespaceExport) {
+          const exported = astIdentifierText(exportNode.exportClause.name);
+          if (exported) {
+            reExports.set(exported, { source, kind: "namespace" });
+          }
+          return;
+        }
+
+        if (exportNode.exportClause.kind === syntaxKind.NamedExports) {
+          for (const element of exportNode.exportClause.elements ?? []) {
+            if (isTypeOnlyNode(element)) {
+              continue;
+            }
+            const exported = astIdentifierText(
+              (element as { name?: unknown }).name,
+            );
+            const imported = astIdentifierText(
+              (element as { propertyName?: unknown }).propertyName,
+            ) ?? exported;
+            if (exported && imported) {
+              reExports.set(exported, { source, kind: "named", imported });
+            }
+          }
+        }
+        return;
+      }
+
+      if (exportNode.exportClause?.kind === syntaxKind.NamedExports) {
+        for (const element of exportNode.exportClause.elements ?? []) {
+          if (isTypeOnlyNode(element)) {
+            continue;
+          }
+          const exported = astIdentifierText(
+            (element as { name?: unknown }).name,
+          );
+          const local = astIdentifierText(
+            (element as { propertyName?: unknown }).propertyName,
+          ) ?? exported;
+          if (exported && local) {
+            exportedConsts.set(exported, local);
+          }
         }
       }
       return;
@@ -420,6 +460,8 @@ export function parseModuleStaticInfo(
     constInitializers,
     functionDeclarations,
     exportedConsts,
+    reExports,
+    exportAllSources,
     defaultExportExpression,
   };
 }

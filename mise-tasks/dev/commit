@@ -1,0 +1,48 @@
+#!/usr/bin/env xonsh
+
+import click
+from rich.console import Console
+from rich.prompt import Confirm, Prompt
+
+console = Console()
+print = console.print
+rule = console.rule
+ask = Confirm.ask
+
+rule(title="Git Auto Commit")
+
+if ask("Stage All?"):
+    rule()
+    git add .
+else:
+    rule()
+
+message = $(gitautom)
+
+print(f"[bold][blue]Auto Commit Message:[/blue] [yellow]{message}[/]")
+
+rule()
+
+if ask("Commit?"):
+    rule()
+    git commit -m f"{message}"
+else:
+    rule()
+    newMessage = click.edit(message)
+    git commit -m f"{newMessage}"
+
+rule()
+
+version = Prompt.ask("Version Number (ex: 0.5.45):")
+
+rule()
+
+git tag f"v{version}"
+
+rule()
+
+if ask("Push?"):
+    rule()
+    git push origin main f"v{version}"
+
+rule("[bold blue]Done[/]")

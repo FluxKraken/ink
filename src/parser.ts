@@ -1542,7 +1542,9 @@ function normalizeThemeVarsRecord(
   options: ParseInkOptions,
   path: readonly string[] = [],
 ): Record<string, StyleValue> | null {
-  if (!isPlainObject(value) || isCssVarRef(value)) {
+  if (
+    !isPlainObject(value) || isCssVarRef(value) || isIdentifierReference(value)
+  ) {
     return null;
   }
 
@@ -1868,7 +1870,10 @@ export function parseInkConfig(
   };
 
   if ("modules" in value) {
-    if (typeof value.modules !== "object" || value.modules === null || Array.isArray(value.modules)) {
+    if (
+      typeof value.modules !== "object" || value.modules === null ||
+      Array.isArray(value.modules)
+    ) {
       return null;
     }
     parseOptions.modules = value.modules as Record<string, string>;
@@ -2047,6 +2052,29 @@ export function parseInkBuilderOptions(
 
 const UNRESOLVED = Symbol("ink-parser-unresolved");
 
+function stringifyTemplatePart(value: unknown): string | null {
+  if (isIdentifierReference(value)) {
+    const themeVar = identifierReferenceToThemeVar(value);
+    if (themeVar) {
+      return String(themeVar);
+    }
+
+    const fontVar = identifierReferenceToFontVar(value);
+    if (fontVar) {
+      return String(fontVar);
+    }
+
+    const cssIdentifierLiteral = identifierReferenceToCssLiteral(value);
+    if (cssIdentifierLiteral !== null) {
+      return cssIdentifierLiteral;
+    }
+
+    return null;
+  }
+
+  return String(value);
+}
+
 function resolveParsedValue(
   value: ParsedValue,
   resolveIdentifier: IdentifierResolver,
@@ -2071,7 +2099,11 @@ function resolveParsedValue(
       if (resolvedPart === UNRESOLVED) {
         return keepUnresolvedIdentifiers ? value : UNRESOLVED;
       }
-      resolvedString += String(resolvedPart);
+      const stringPart = stringifyTemplatePart(resolvedPart);
+      if (stringPart === null) {
+        return keepUnresolvedIdentifiers ? value : UNRESOLVED;
+      }
+      resolvedString += stringPart;
     }
     return resolvedString;
   }

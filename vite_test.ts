@@ -144,6 +144,9 @@ Deno.test("AST module parser handles imports, exports, and TS syntax", () => {
     `export const card = { base, className: merge("prose") } satisfies Record<string, unknown>;\n` +
     `function helper<T>(value: T): T { return value; }\n` +
     `export { helper as makeHelper };\n` +
+    `export { default as preset, color as accentColor } from "./preset";\n` +
+    `export * from "./tokens";\n` +
+    `export * as palette from "./palette";\n` +
     `export default { card, tokens } as const;\n`;
 
   const info = parseModuleStaticInfo(
@@ -168,6 +171,21 @@ Deno.test("AST module parser handles imports, exports, and TS syntax", () => {
   assertEquals(info.constInitializers.has("base"), true);
   assertEquals(info.exportedConsts.get("card"), "card");
   assertEquals(info.exportedConsts.get("makeHelper"), "helper");
+  assertEquals(info.reExports.get("preset"), {
+    source: "./preset",
+    kind: "named",
+    imported: "default",
+  });
+  assertEquals(info.reExports.get("accentColor"), {
+    source: "./preset",
+    kind: "named",
+    imported: "color",
+  });
+  assertEquals(info.reExports.get("palette"), {
+    source: "./palette",
+    kind: "namespace",
+  });
+  assertEquals(info.exportAllSources, ["./tokens"]);
   assert(info.defaultExportExpression?.includes("{ card, tokens }"));
 });
 
@@ -2621,6 +2639,22 @@ Deno.test("parser resolves tVar.eval() theme templates", () => {
   );
 });
 
+Deno.test("parser resolves tVar references in template literals", () => {
+  const parsed = parseInkCallArguments(`{
+    base: {
+      content: {
+        width: \`min(\${tVar.site.width}, 100%)\`
+      }
+    }
+  }`);
+
+  assert(parsed !== null);
+  assertEquals(
+    styleDeclarationOf(parsed.base.content).width,
+    "min(var(--site-width), 100%)",
+  );
+});
+
 Deno.test("parser resolves multiline tVar.eval() theme templates", () => {
   const parsed = parseInkCallArguments(`{
     base: {
@@ -4833,6 +4867,82 @@ Deno.test("loads ink.config.ts theme values computed through namespace helper ba
     assert(
       css.includes(
         ":root{--site-background:linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%));--site-foreground:black}",
+      ),
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("loads ink.config.ts theme values through re-export barrels", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/lib/styles/utilities`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/utilities/color.ts`,
+      `export function hsl(h: number, s: number, l: number) {\n` +
+        `  return \`hsl(\${h} \${s}% \${l}%)\`;\n` +
+        `}\n` +
+        `export function linearGradient(input: { direction: string; from: string; to: string }) {\n` +
+        `  return \`linear-gradient(\${input.direction}, \${input.from}, \${input.to})\`;\n` +
+        `}\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/utilities/index.ts`,
+      `export * as Color from "./color";\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/defaults.ts`,
+      `export default { width: "72rem", gutter: "2rem" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/default-barrel.ts`,
+      `export { default } from "./defaults";\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/lib/styles/index.ts`,
+      `export * from "./utilities";\n` +
+        `export { Color as Palette } from "./utilities";\n` +
+        `export { default as Defaults } from "./defaults";\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { defineInkConfig, Theme } from "@kraken/ink";\n` +
+        `import { Color, Defaults, Palette } from "./src/lib/styles";\n` +
+        `import DefaultSettings from "./src/lib/styles/default-barrel";\n` +
+        `const colors = {\n` +
+        `  blue: Color.hsl(200, 100, 50),\n` +
+        `  yellow: Palette.hsl(60, 80, 80),\n` +
+        `};\n` +
+        `const defaultTheme = new Theme({\n` +
+        `  site: {\n` +
+        `    background: Color.linearGradient({\n` +
+        `      direction: "147deg",\n` +
+        `      from: colors.blue,\n` +
+        `      to: colors.yellow,\n` +
+        `    }),\n` +
+        `    width: Defaults.width,\n` +
+        `    gutter: DefaultSettings.gutter,\n` +
+        `  },\n` +
+        `});\n` +
+        `export default defineInkConfig({\n` +
+        `  themes: { default: defaultTheme },\n` +
+        `  themeMode: "scope",\n` +
+        `  resolution: "static",\n` +
+        `});\n`,
+    );
+
+    const plugin = inkVite();
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(
+      css.includes(
+        ":root{--site-background:linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%));--site-width:72rem;--site-gutter:2rem}",
       ),
     );
   } finally {
@@ -7523,6 +7633,64 @@ Deno.test("vite extracts bare identifier declaration values with template litera
   }
 });
 
+Deno.test("vite extracts builder styles from local layout abstractions", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const moduleCode = `import ink, { tVar } from "@kraken/ink";\n` +
+    `const layoutStyles = new ink();\n` +
+    `const panel = {\n` +
+    `  gap: 0.75,\n` +
+    `  padding: [0.25, 1],\n` +
+    `};\n` +
+    `const radius = 0.5;\n` +
+    `const Wrapper = {\n` +
+    `  display: "grid",\n` +
+    `  gridTemplateRows: ["auto", "1fr", "auto"],\n` +
+    `  gap: panel.gap,\n` +
+    `  minHeight: "100dvh",\n` +
+    `};\n` +
+    `const Header = {\n` +
+    `  base: {\n` +
+    `    marginInline: panel.gap,\n` +
+    `    padding: panel.padding,\n` +
+    `    borderRadius: radius,\n` +
+    `  },\n` +
+    `};\n` +
+    `const Content = {\n` +
+    `  width: \`min(\${tVar.site.width}, 100%)\`,\n` +
+    `  padding: 1,\n` +
+    `  borderRadius: radius,\n` +
+    `};\n` +
+    `layoutStyles.base = {\n` +
+    `  wrapper: Wrapper,\n` +
+    `  header: Header.base,\n` +
+    `  content: Content,\n` +
+    `};\n`;
+  const transformed = transform(
+    moduleCode,
+    "/app/src/lib/components/layout/layoutStyles.ts",
+  );
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{display:grid;grid-template-rows:auto 1fr auto;gap:0\.75px;min-height:100dvh\}/,
+  );
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{margin-inline:0\.75px;padding:0\.25px 1px;border-radius:0\.5px\}/,
+  );
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{width:min\(var\(--site-width\), 100%\);padding:1px;border-radius:0\.5px\}/,
+  );
+});
+
 Deno.test("vite extracts new ink() with variants and global", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
@@ -7642,6 +7810,54 @@ Deno.test("vite extracts tVar references from new ink() builder assignments", ()
   assertMatch(
     css,
     /\.ink_[a-z0-9]+\{background-color:var\(--header-bg\);color:var\(--header-fg\)\}/,
+  );
+});
+
+Deno.test("vite extracts new ink() builder styles assigned through shared const objects", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+
+  const moduleCode = `import ink, { tVar } from "@kraken/ink";\n` +
+    `const panel = {\n` +
+    `  gap: 0.75,\n` +
+    `  padding: [0.25, 1],\n` +
+    `};\n` +
+    `const radius = 0.5;\n` +
+    `const Wrapper = {\n` +
+    `  display: "grid",\n` +
+    `  gap: panel.gap,\n` +
+    `  padding: panel.padding,\n` +
+    `};\n` +
+    `const Content = {\n` +
+    `  background: tVar.content.background,\n` +
+    `  width: \`min(\${tVar.site.width}, 100%)\`,\n` +
+    `  borderRadius: radius,\n` +
+    `};\n` +
+    `const layoutStyles = new ink();\n` +
+    `layoutStyles.base = {\n` +
+    `  wrapper: Wrapper,\n` +
+    `  content: Content,\n` +
+    `};\n`;
+  const transformed = transform(
+    moduleCode,
+    "/app/src/lib/components/layout/layoutStyles.ts",
+  );
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const code = transformed.code as string;
+  assert(!code.includes("new ink()"));
+
+  const css = load(VIRTUAL_ID) as string;
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{display:grid;gap:0\.75px;padding:0\.25px 1px\}/,
+  );
+  assertMatch(
+    css,
+    /\.ink_[a-z0-9]+\{background:var\(--content-background\);width:min\(var\(--site-width\), 100%\);border-radius:0\.5px\}/,
   );
 });
 
