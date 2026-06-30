@@ -1,7 +1,8 @@
 {
   "name": "@kraken/ink",
-  "version": "0.5.55",
+  "version": "0.5.56",
   "license": "MIT",
+  "nodeModulesDir": "auto",
   "exports": {
     ".": "./mod.ts",
     "./cli": "./src/cli.ts",
@@ -9,7 +10,8 @@
     "./vite": "./vite.ts"
   },
   "imports": {
-    "csstype": "npm:csstype@^3.2.3"
+    "csstype": "npm:csstype@^3.2.3",
+    "react": "npm:react@^19.2.0"
   },
   "types": "./mod.d.ts",
   "publish": {

@@ -147,7 +147,43 @@ export interface ThemeAdvancedInput {
   vars: ThemeTokenInput;
 }
 /** Theme expansion strategy used for imported themes. */
-export type ThemeMode = "scope" | "color-scheme" | "custom";
+export type ThemeMode = "scope" | "color-scheme" | "custom" | "store";
+/** Cleanup function or subscription object returned by a theme store. */
+export type ThemeStoreUnsubscribe = (() => void) | { unsubscribe(): void };
+/** Store-like value that can drive the active theme name. */
+export type ThemeStore<T extends string = string> =
+  | {
+    subscribe(
+      run: (value: T) => void,
+    ): ThemeStoreUnsubscribe | void;
+  }
+  | {
+    subscribe(
+      run: () => void,
+    ): ThemeStoreUnsubscribe | void;
+    getSnapshot(): T;
+  }
+  | {
+    subscribe(
+      run: (value?: T) => void,
+    ): ThemeStoreUnsubscribe | void;
+    getState(): T;
+  }
+  | {
+    subscribe(
+      run: (value?: T) => void,
+    ): ThemeStoreUnsubscribe | void;
+    get(): T;
+  }
+  | {
+    subscribe(
+      run: (value?: T) => void,
+    ): ThemeStoreUnsubscribe | void;
+    readonly state: T;
+  }
+  | {
+    readonly current: T;
+  };
 /** Theme-like value accepted by `themes`. */
 export type ThemeInput = Theme | ThemeAdvanced | ThemeTokenInput;
 /** Map of imported theme names/selectors to theme definitions. */
@@ -290,6 +326,8 @@ export interface InkConfigFile {
   defaultUnit?: string;
   /** Theme expansion strategy used for project-wide themes. */
   themeMode?: ThemeMode;
+  /** Store-like value whose current value names the active theme when `themeMode` is `"store"`. */
+  themeStore?: ThemeStore;
   /** Static extraction strategy used by the Vite plugin. */
   resolution?: InkResolution;
   /** Static/dynamic transform debug logging. */
@@ -606,6 +644,27 @@ function toColorSchemeThemeName(scope: string): "default" | "dark" | null {
   return trimmed === "dark" ? "dark" : null;
 }
 
+function escapeCssString(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\a ")
+    .replace(/\r/g, "\\d ")
+    .replace(/\f/g, "\\c ");
+}
+
+function toStoreThemeScopeSelector(scope: string): string | null {
+  const trimmed = scope.trim();
+  if (
+    trimmed.length === 0 || trimmed === "default" || trimmed === "root" ||
+    trimmed === ":root"
+  ) {
+    return null;
+  }
+
+  return `[data-ink-theme="${escapeCssString(trimmed)}"]`;
+}
+
 /** Expand `themes` into `root` vars and mode-specific global rules. */
 export function themesToConfig(
   themes: ImportedThemesInput | undefined,
@@ -657,6 +716,27 @@ export function themesToConfig(
 
     if (themeMode === "custom") {
       const selector = toThemeScopeSelector((theme as ThemeAdvanced).selector);
+
+      if (selector === null) {
+        root.push(vars);
+        continue;
+      }
+
+      const scopeKey = `@scope (${selector})`;
+      const currentRule = (global[scopeKey] as
+        | Record<string, StyleValue | StyleDeclaration>
+        | undefined) ??
+        {};
+      const currentScope =
+        (currentRule[":scope"] as Record<string, StyleValue> | undefined) ??
+          {};
+      currentRule[":scope"] = { ...currentScope, ...vars };
+      global[scopeKey] = currentRule as StyleDeclaration;
+      continue;
+    }
+
+    if (themeMode === "store") {
+      const selector = toStoreThemeScopeSelector(scope);
 
       if (selector === null) {
         root.push(vars);

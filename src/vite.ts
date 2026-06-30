@@ -46,6 +46,12 @@ const PUBLIC_VIRTUAL_ID = "virtual:ink/styles.css";
 const RESOLVED_VIRTUAL_ID = "\0virtual:ink/styles.css";
 const PUBLIC_TAILWIND_RUNTIME_ID = "virtual:ink/tailwind-merge";
 const RESOLVED_TAILWIND_RUNTIME_ID = "\0virtual:ink/tailwind-merge";
+const PUBLIC_THEME_STORE_RUNTIME_ID = "virtual:ink/theme-store";
+const RESOLVED_THEME_STORE_RUNTIME_ID = "\0virtual:ink/theme-store";
+const PUBLIC_SVELTE_THEME_STORE_RUNTIME_ID =
+  "virtual:ink/theme-store.svelte.ts";
+const RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID =
+  "\0virtual:ink/theme-store.svelte.ts";
 const MODULE_VIRTUAL_QUERY_KEY = "ink-module";
 const SIMPLE_STYLE_KEY = "__ink_simple__";
 const STATIC_STYLE_EXTENSIONS = [
@@ -143,6 +149,7 @@ type LoadedInkConfig = {
   dependencies: string[];
   imports: string[];
   themeMode: ThemeMode;
+  hasThemeStore: boolean;
   resolution: "static" | "dynamic" | "hybrid";
   hasExplicitResolution: boolean;
   debug: {
@@ -476,6 +483,98 @@ import { setTailwindMerge } from ${
     JSON.stringify(resolveTailwindSharedModuleUrl())
   };
 setTailwindMerge(twMerge);
+export {};
+`;
+}
+
+function loadThemeStoreRuntimeModule(
+  inkConfig: LoadedInkConfig,
+  viteRoot: string,
+  options: { svelte: boolean },
+): string {
+  if (
+    inkConfig.themeMode !== "store" || !inkConfig.hasThemeStore ||
+    !inkConfig.path
+  ) {
+    return "export {};\n";
+  }
+
+  const configImportPath = toBrowserModuleImportPath(inkConfig.path, viteRoot);
+  const runtimeKey = options.svelte
+    ? "__ink_svelte_theme_store_cleanup__"
+    : "__ink_theme_store_cleanup__";
+  const svelteCurrentBridge = options.svelte
+    ? `
+if (!__inkCleanup && __inkThemeStore && typeof __inkThemeStore === "object" && "current" in __inkThemeStore) {
+  __inkCleanup = $effect.root(() => {
+    $effect(() => {
+      __inkApplyTheme(__inkThemeStore.current);
+    });
+  });
+}
+`
+    : "";
+
+  return `import __inkConfig from ${JSON.stringify(configImportPath)};
+
+const __inkRuntimeKey = ${JSON.stringify(runtimeKey)};
+const __inkThemeStore = __inkConfig?.themeStore;
+
+function __inkReadTheme(store) {
+  if (!store) return undefined;
+  if (typeof store.getSnapshot === "function") return store.getSnapshot();
+  if (typeof store.getState === "function") return store.getState();
+  if (typeof store.get === "function") return store.get();
+  if (typeof store === "object" && "state" in store) return store.state;
+  if (typeof store === "object" && "current" in store) return store.current;
+  if (typeof store === "function") return store();
+  return undefined;
+}
+
+function __inkApplyTheme(value) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  if (value === undefined || value === null || value === "") {
+    root.removeAttribute("data-ink-theme");
+    return;
+  }
+  root.setAttribute("data-ink-theme", String(value));
+}
+
+function __inkDispose(cleanup) {
+  if (typeof cleanup === "function") {
+    cleanup();
+    return;
+  }
+  if (cleanup && typeof cleanup.unsubscribe === "function") {
+    cleanup.unsubscribe();
+  }
+}
+
+function __inkInstallThemeStore(store) {
+  if (!store) return undefined;
+  __inkApplyTheme(__inkReadTheme(store));
+  if (typeof store.subscribe !== "function") {
+    return undefined;
+  }
+  const unsubscribe = store.subscribe((...args) => {
+    __inkApplyTheme(args.length > 0 ? args[0] : __inkReadTheme(store));
+  });
+  return () => __inkDispose(unsubscribe);
+}
+
+globalThis[__inkRuntimeKey]?.();
+let __inkCleanup = __inkInstallThemeStore(__inkThemeStore);
+${svelteCurrentBridge}
+globalThis[__inkRuntimeKey] = __inkCleanup ?? (() => {});
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    globalThis[__inkRuntimeKey]?.();
+    delete globalThis[__inkRuntimeKey];
+  });
+}
+
 export {};
 `;
 }
@@ -845,6 +944,16 @@ function addVirtualImportToModule(
     return addVirtualImportToAstro(code, importId);
   }
   return addVirtualImport(code, importId);
+}
+
+function addThemeStoreRuntimeImport(
+  code: string,
+  options: { isSvelte: boolean; isAstro: boolean },
+): string {
+  const importId = options.isSvelte
+    ? PUBLIC_SVELTE_THEME_STORE_RUNTIME_ID
+    : PUBLIC_THEME_STORE_RUNTIME_ID;
+  return addVirtualImportToModule(code, options, importId);
 }
 
 function addModuleVirtualImportToAstro(code: string, importId: string): string {
@@ -1301,7 +1410,8 @@ function normalizeResolution(value: unknown): "static" | "dynamic" | "hybrid" {
 }
 
 function normalizeThemeMode(value: unknown): ThemeMode {
-  return value === "scope" || value === "color-scheme" || value === "custom"
+  return value === "scope" || value === "color-scheme" ||
+      value === "custom" || value === "store"
     ? value
     : "color-scheme";
 }
@@ -1431,6 +1541,20 @@ function toBrowserStylesheetPath(
   }
 
   return formatResult(bareImportPathRaw);
+}
+
+function toBrowserModuleImportPath(
+  filePath: string,
+  viteRoot: string,
+): string {
+  const normalizedFile = getNodePath().normalize(filePath);
+  const relative = getNodePath().relative(viteRoot, normalizedFile)
+    .split(getNodePath().sep).join("/");
+  if (!relative.startsWith("..") && !getNodePath().isAbsolute(relative)) {
+    return `/${relative}`;
+  }
+
+  return `/@fs/${normalizedFile.split(getNodePath().sep).join("/")}`;
 }
 
 function stripQueryAndHash(value: string): string {
@@ -2164,6 +2288,7 @@ function loadInkConfig(
       dependencies: [],
       imports: [],
       themeMode: "color-scheme",
+      hasThemeStore: false,
       resolution: "hybrid",
       hasExplicitResolution: false,
       debug: {
@@ -2266,6 +2391,10 @@ function loadInkConfig(
   );
   const resolution = normalizeResolution(configObject.resolution);
   const themeMode = normalizeThemeMode(configObject.themeMode);
+  const hasThemeStore = Object.prototype.hasOwnProperty.call(
+    configObject,
+    "themeStore",
+  );
   const debug = normalizeDebugOptions(configObject.debug);
   const breakpoints = normalizeBreakpoints(configObject.breakpoints);
   const breakpointBoundary = normalizeBreakpointBoundary(
@@ -2390,6 +2519,7 @@ function loadInkConfig(
     dependencies: Array.from(dependencies),
     imports: allImports,
     themeMode,
+    hasThemeStore,
     resolution,
     hasExplicitResolution,
     debug,
@@ -2873,7 +3003,13 @@ function evaluateExpression(
 ): unknown | null {
   const IDENTIFIER_PROXY_PATH = Symbol("ink-identifier-proxy-path");
   const createIdentifierProxy = (path: string[]): unknown =>
-    new Proxy({ [IDENTIFIER_PROXY_PATH]: path }, {
+    new Proxy(function () {}, {
+      apply() {
+        return createIdentifierProxy(path);
+      },
+      construct() {
+        return createIdentifierProxy(path) as object;
+      },
       get(_target, key) {
         if (key === IDENTIFIER_PROXY_PATH) {
           return path;
@@ -2894,7 +3030,10 @@ function evaluateExpression(
     value: unknown,
     seen = new WeakMap<object, unknown>(),
   ): unknown => {
-    if (typeof value !== "object" || value === null) {
+    if (
+      (typeof value !== "object" && typeof value !== "function") ||
+      value === null
+    ) {
       return value;
     }
 
@@ -2909,6 +3048,9 @@ function evaluateExpression(
         kind: "identifier-ref",
         path: [...proxyPath],
       };
+    }
+    if (typeof value === "function") {
+      return value;
     }
 
     if (seen.has(value)) {
@@ -3618,6 +3760,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     dependencies: [],
     imports: [],
     themeMode: "color-scheme",
+    hasThemeStore: false,
     resolution: "hybrid",
     hasExplicitResolution: false,
     debug: {
@@ -3831,14 +3974,20 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     invalidatedModules?: Set<unknown>,
   ): unknown[] {
     const invalidated = new Set<unknown>();
-    for (
-      const module of invalidateModuleById(
-        RESOLVED_VIRTUAL_ID,
-        timestamp,
-        invalidatedModules,
-      )
-    ) {
-      invalidated.add(module);
+    for (const virtualId of [
+      RESOLVED_VIRTUAL_ID,
+      RESOLVED_THEME_STORE_RUNTIME_ID,
+      RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID,
+    ]) {
+      for (
+        const module of invalidateModuleById(
+          virtualId,
+          timestamp,
+          invalidatedModules,
+        )
+      ) {
+        invalidated.add(module);
+      }
     }
     for (const moduleId of moduleIds) {
       for (
@@ -3910,6 +4059,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       if (cleanId(id) === PUBLIC_TAILWIND_RUNTIME_ID) {
         return RESOLVED_TAILWIND_RUNTIME_ID;
       }
+      if (cleanId(id) === PUBLIC_THEME_STORE_RUNTIME_ID) {
+        return RESOLVED_THEME_STORE_RUNTIME_ID;
+      }
+      if (cleanId(id) === PUBLIC_SVELTE_THEME_STORE_RUNTIME_ID) {
+        return RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID;
+      }
       return null;
     },
 
@@ -3923,6 +4078,16 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       }
       if (cleanId(id) === RESOLVED_TAILWIND_RUNTIME_ID) {
         return loadTailwindRuntimeModule();
+      }
+      if (cleanId(id) === RESOLVED_THEME_STORE_RUNTIME_ID) {
+        return loadThemeStoreRuntimeModule(inkConfig, viteRoot, {
+          svelte: false,
+        });
+      }
+      if (cleanId(id) === RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID) {
+        return loadThemeStoreRuntimeModule(inkConfig, viteRoot, {
+          svelte: true,
+        });
       }
       return null;
     },
@@ -3982,6 +4147,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           const didVirtualCssChange = clearManagedModuleState(normalizedId);
           managedModules.add(normalizedId);
           nextCode = addVirtualImportToModule(nextCode, { isSvelte, isAstro });
+          if (inkConfig.themeMode === "store" && inkConfig.hasThemeStore) {
+            nextCode = addThemeStoreRuntimeImport(nextCode, {
+              isSvelte,
+              isAstro,
+            });
+          }
           if (didVirtualCssChange) {
             invalidateVirtualModules();
           }
@@ -4003,6 +4174,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         nextCode = isSvelte
           ? addVirtualImportToSvelte(nextCode)
           : addVirtualImportToAstro(nextCode);
+        if (inkConfig.themeMode === "store" && inkConfig.hasThemeStore) {
+          nextCode = addThemeStoreRuntimeImport(nextCode, {
+            isSvelte,
+            isAstro,
+          });
+        }
         return {
           code: nextCode,
           map: null,
@@ -4929,6 +5106,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             : isAstro
             ? addModuleVirtualImportToAstro(nextCode, scopedVirtualImport)
             : addVirtualImport(nextCode, scopedVirtualImport);
+        }
+        if (inkConfig.themeMode === "store" && inkConfig.hasThemeStore) {
+          nextCode = addThemeStoreRuntimeImport(nextCode, {
+            isSvelte,
+            isAstro,
+          });
         }
         if (didVirtualCssChange) {
           invalidateVirtualModules(scopedVirtualImport ? [normalizedId] : []);

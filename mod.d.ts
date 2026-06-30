@@ -28,6 +28,8 @@ import {
   ThemeAdvanced,
   ThemeAdvancedInput,
   ThemeMode,
+  ThemeStore,
+  ThemeStoreUnsubscribe,
   ThemeTokenInput,
   ThemeVarAccessor,
   tw,
@@ -257,6 +259,8 @@ export type { ThemeTokenInput };
 export type { ThemeAdvancedInput };
 /** Re-exported theme expansion mode type. */
 export type { ThemeMode };
+/** Store-like value that can drive `themeMode: "store"`. */
+export type { ThemeStore, ThemeStoreUnsubscribe };
 /** Re-exported imported theme map type. */
 export type { ImportedThemesInput };
 /** Project-wide config shape accepted by `ink.config.ts`. */

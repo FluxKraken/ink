@@ -61,7 +61,8 @@
   },
   "workspace": {
     "dependencies": [
-      "npm:csstype@^3.2.3"
+      "npm:csstype@^3.2.3",
+      "npm:react@^19.2.0"
     ],
     "packageJson": {
       "dependencies": [

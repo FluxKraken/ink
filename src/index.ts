@@ -127,6 +127,8 @@ export type { ThemeTokenInput } from "./shared.js";
 export type { ThemeAdvancedInput } from "./shared.js";
 /** Theme expansion strategy used for imported themes. */
 export type { ThemeMode } from "./shared.js";
+/** Store-like value that can drive `themeMode: "store"`. */
+export type { ThemeStore, ThemeStoreUnsubscribe } from "./shared.js";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./shared.js";
 /** Project-wide config shape accepted by `ink.config.ts`. */

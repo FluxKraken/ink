@@ -76,6 +76,8 @@ export type { ThemeTokenInput } from "./src/index.ts";
 export type { ThemeAdvancedInput } from "./src/index.ts";
 /** Theme expansion strategy used for imported themes. */
 export type { ThemeMode } from "./src/index.ts";
+/** Store-like value that can drive `themeMode: "store"`. */
+export type { ThemeStore, ThemeStoreUnsubscribe } from "./src/index.ts";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./src/index.ts";
 /** Project-wide config shape accepted by `ink.config.ts`. */

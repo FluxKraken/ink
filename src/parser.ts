@@ -1588,6 +1588,27 @@ function toColorSchemeThemeName(scope: string): "default" | "dark" | null {
   return trimmed === "dark" ? "dark" : null;
 }
 
+function escapeCssString(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\a ")
+    .replace(/\r/g, "\\d ")
+    .replace(/\f/g, "\\c ");
+}
+
+function toStoreThemeScopeSelector(scope: string): string | null {
+  const trimmed = scope.trim();
+  if (
+    trimmed.length === 0 || trimmed === "default" || trimmed === "root" ||
+    trimmed === ":root"
+  ) {
+    return null;
+  }
+
+  return `[data-ink-theme="${escapeCssString(trimmed)}"]`;
+}
+
 function normalizeThemeVarsRecord(
   value: unknown,
   options: ParseInkOptions,
@@ -1676,6 +1697,25 @@ function normalizeImportedThemes(
       const selector = toThemeScopeSelector(
         (themeValue as ThemeAdvanced).selector,
       );
+      if (selector === null) {
+        root.push(vars);
+        continue;
+      }
+
+      const scopeKey = `@scope (${selector})`;
+      const scopeRule = (global[scopeKey] as
+        | Record<string, StyleDeclaration | StyleValue>
+        | undefined) ??
+        {};
+      const currentScope =
+        (scopeRule[":scope"] as Record<string, StyleValue> | undefined) ?? {};
+      scopeRule[":scope"] = { ...currentScope, ...vars };
+      global[scopeKey] = scopeRule as StyleDeclaration;
+      continue;
+    }
+
+    if (options.themeMode === "store") {
+      const selector = toStoreThemeScopeSelector(scope);
       if (selector === null) {
         root.push(vars);
         continue;

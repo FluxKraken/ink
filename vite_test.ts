@@ -39,6 +39,9 @@ import {
 
 const VIRTUAL_ID = "\0virtual:ink/styles.css";
 const TAILWIND_RUNTIME_VIRTUAL_ID = "\0virtual:ink/tailwind-merge";
+const THEME_STORE_RUNTIME_VIRTUAL_ID = "\0virtual:ink/theme-store";
+const SVELTE_THEME_STORE_RUNTIME_VIRTUAL_ID =
+  "\0virtual:ink/theme-store.svelte.ts";
 const MODULE_VIRTUAL_QUERY_KEY = "ink-module";
 
 function scopedVirtualId(moduleId: string): string {
@@ -728,6 +731,67 @@ Deno.test("injects virtual stylesheet import in configured Svelte root layout", 
   }
 });
 
+Deno.test("injects Svelte theme-store runtime in configured Svelte root layout", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { defineInkConfig } from "@kraken/ink";\n` +
+        `import { PersistedState } from "runed";\n` +
+        `const themeMode = new PersistedState("themeMode", "light");\n` +
+        `export default defineInkConfig({\n` +
+        `  rootLayout: "./src/routes/+layout.svelte",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore: themeMode,\n` +
+        `  themes: {\n` +
+        `    light: { headerBG: "black" },\n` +
+        `    dark: { headerBG: "white" },\n` +
+        `  },\n` +
+        `});\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `<slot />`,
+      `${root}/src/routes/+layout.svelte`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.includes('import "virtual:ink/styles.css";'));
+    assert(code.includes('import "virtual:ink/theme-store.svelte.ts";'));
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(
+      css.includes(
+        '@scope ([data-ink-theme="light"]){:scope{--header-bg:black}}',
+      ),
+    );
+    assert(
+      css.includes(
+        '@scope ([data-ink-theme="dark"]){:scope{--header-bg:white}}',
+      ),
+    );
+
+    const runtime = load(SVELTE_THEME_STORE_RUNTIME_VIRTUAL_ID) as string;
+    assert(runtime.includes('import __inkConfig from "/ink.config.ts";'));
+    assert(runtime.includes("$effect.root"));
+    assert(runtime.includes("data-ink-theme"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("injects virtual stylesheet import in configured TSX root layout", () => {
   const root = Deno.makeTempDirSync();
 
@@ -755,6 +819,61 @@ Deno.test("injects virtual stylesheet import in configured TSX root layout", () 
     const code = transformed.code as string;
     assert(code.startsWith('import "virtual:ink/styles.css";\n'));
     assert(code.includes("export function Root()"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("injects generic theme-store runtime in configured TSX root layout", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `const themeMode = {\n` +
+        `  state: "light",\n` +
+        `  subscribe(listener: (value: string) => void) {\n` +
+        `    listener(this.state);\n` +
+        `    return { unsubscribe() {} };\n` +
+        `  },\n` +
+        `};\n` +
+        `export default {\n` +
+        `  rootLayout: "./src/routes/__root.tsx",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore: themeMode,\n` +
+        `  themes: {\n` +
+        `    light: { headerBG: "black" },\n` +
+        `    dark: { headerBG: "white" },\n` +
+        `  },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `export function Root() { return null; }\n`,
+      `${root}/src/routes/__root.tsx`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.startsWith('import "virtual:ink/theme-store";\n'));
+    assert(code.includes('import "virtual:ink/styles.css";'));
+
+    const runtime = load(THEME_STORE_RUNTIME_VIRTUAL_ID) as string;
+    assert(runtime.includes('import __inkConfig from "/ink.config.ts";'));
+    assert(runtime.includes("getSnapshot"));
+    assert(runtime.includes("getState"));
+    assert(runtime.includes("data-ink-theme"));
+    assert(!runtime.includes("$effect.root"));
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -2383,6 +2502,51 @@ Deno.test("published types accept project config Fontsource fonts", () => {
   `);
 });
 
+Deno.test("published types accept store-backed theme config", () => {
+  assertPackageTypesSucceed(`
+    import {
+      defineInkConfig,
+      type ThemeStore,
+      type ThemeStoreUnsubscribe,
+    } from "@kraken/ink";
+
+    const reactStore = {
+      getSnapshot: () => "light",
+      subscribe(listener: () => void): ThemeStoreUnsubscribe {
+        listener();
+        return () => {};
+      },
+    };
+
+    const tanstackStore = {
+      state: "dark",
+      get: () => "dark",
+      subscribe(listener: (value: string) => void) {
+        listener("dark");
+        return { unsubscribe() {} };
+      },
+    } satisfies ThemeStore;
+
+    export const reactConfig = defineInkConfig({
+      themeMode: "store",
+      themeStore: reactStore,
+      themes: {
+        light: { surface: "#fff" },
+        dark: { surface: "#111" },
+      },
+    });
+
+    export const tanstackConfig = defineInkConfig({
+      themeMode: "store",
+      themeStore: tanstackStore,
+      themes: {
+        light: { surface: "#fff" },
+        dark: { surface: "#111" },
+      },
+    });
+  `);
+});
+
 Deno.test("published types accept ThemeAdvanced custom theme definitions", () => {
   assertPackageTypesSucceed(`
     import ink, { ThemeAdvanced, type ThemeAdvancedInput } from "@kraken/ink";
@@ -2556,6 +2720,36 @@ Deno.test("parser expands themes and resolves tVar references", () => {
     styleDeclarationOf(parsed.base.header).backgroundColor,
     cVar("--header-bg"),
   );
+});
+
+Deno.test("parser expands themes into store attribute scopes", () => {
+  const parsed = parseInkCallArguments(
+    `{
+      themes: {
+        light: {
+          headerBG: "black"
+        },
+        dark: {
+          headerBG: "white"
+        }
+      }
+    }`,
+    { themeMode: "store" },
+  );
+
+  assert(parsed !== null);
+  const lightScope = parsed.global?.[
+    '@scope ([data-ink-theme="light"])'
+  ] as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  const darkScope = parsed.global?.[
+    '@scope ([data-ink-theme="dark"])'
+  ] as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  assertEquals(lightScope?.[":scope"]?.["--header-bg"], "black");
+  assertEquals(darkScope?.[":scope"]?.["--header-bg"], "white");
 });
 
 Deno.test("parser flattens nested theme groups and resolves nested tVar references", () => {

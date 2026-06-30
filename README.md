@@ -397,6 +397,36 @@ styles.themes = {
 };
 ```
 
+With `themeMode: "store"`, Ink emits each non-root theme under a
+`data-ink-theme` scope and imports a small runtime bridge that mirrors
+`themeStore` onto `document.documentElement`. This works with Svelte stores,
+React external-store style objects, TanStack stores, and Runed
+`PersistedState` in Svelte root layouts.
+
+```ts
+import { defineInkConfig } from "@kraken/ink";
+import { PersistedState } from "runed";
+import Themes from "./src/lib/styles/themes";
+
+const themeMode = new PersistedState("themeMode", "light");
+
+export default defineInkConfig({
+  rootLayout: "./src/routes/+layout.svelte",
+  themeMode: "store",
+  themeStore: themeMode,
+  themes: {
+    light: Themes.light,
+    dark: Themes.dark,
+  },
+});
+```
+
+For React or TanStack Start, pass a subscribable store such as one with
+`subscribe` plus `getSnapshot`, `getState`, `get`, or `state`. Store values
+should match the keys in `themes`. Because the store bridge imports
+`ink.config.ts` in the client bundle, keep the store-backed config and its
+imports browser-safe.
+
 ### React theme helper
 
 If you want a small React wrapper for TanStack Start or other React apps, import
@@ -707,12 +737,15 @@ export default defineInkConfig({
 `themeMode: "color-scheme"` uses `themes.default` as the light/root theme and
 `themes.dark` inside `@media (prefers-color-scheme: dark)`. Use
 `themeMode: "scope"` to keep the existing class/selector-based `@scope`
-switching, or `themeMode: "custom"` with `ThemeAdvanced` when each theme should
-carry its own selector.
+switching, `themeMode: "custom"` with `ThemeAdvanced` when each theme should
+carry its own selector, or `themeMode: "store"` with `themeStore` when an app
+store should choose the active theme.
 
 The singular `import` field accepts the same inputs as `styles.import(...)`.
 Set `rootLayout` to your root Svelte, Astro, or TS/TSX layout module to have
-the shared stylesheet imported automatically.
+the shared stylesheet imported automatically. Store-backed themes also use
+`rootLayout` to install the store bridge in apps with no direct root-level
+`ink()` call.
 
 Then consume those aliases in your builder:
 

@@ -35,8 +35,6 @@ rule()
 
 version = Prompt.ask("Version Number (ex: 0.5.45):")
 
-rule()
-
 git tag f"v{version}"
 
 rule()
