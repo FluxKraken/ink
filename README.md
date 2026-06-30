@@ -401,31 +401,91 @@ With `themeMode: "store"`, Ink emits each non-root theme under a
 `data-ink-theme` scope and imports a small runtime bridge that mirrors
 `themeStore` onto `document.documentElement`. This works with Svelte stores,
 React external-store style objects, TanStack stores, and Runed
-`PersistedState` in Svelte root layouts.
+`PersistedState` in Svelte root layouts. Put the store in a browser-safe module
+and import that same singleton from both `ink.config.ts` and your app UI.
 
 ```ts
-import { defineInkConfig } from "@kraken/ink";
+// src/lib/theme.svelte.ts
 import { PersistedState } from "runed";
-import Themes from "./src/lib/styles/themes";
 
-const themeMode = new PersistedState("themeMode", "light");
+export const themeState = new PersistedState("themeMode", "light");
+```
+
+```ts
+// ink.config.ts
+import { defineInkConfig, Theme } from "@kraken/ink";
+import { themeState } from "./src/lib/theme.svelte";
+
+const light = new Theme({
+  site: {
+    bg: "white",
+    fg: "black",
+  },
+});
+
+const dark = new Theme({
+  site: {
+    bg: "black",
+    fg: "white",
+  },
+});
 
 export default defineInkConfig({
   rootLayout: "./src/routes/+layout.svelte",
   themeMode: "store",
-  themeStore: themeMode,
+  themeStore: themeState,
   themes: {
-    light: Themes.light,
-    dark: Themes.dark,
+    light,
+    dark,
   },
 });
 ```
 
+Then update the shared store from your app. In Svelte with Runed, changing
+`.current` is reactive and the Ink bridge mirrors it to
+`<html data-ink-theme="...">`.
+
+```svelte
+<!-- src/routes/+page.svelte -->
+<script lang="ts">
+  import { themeState } from "$lib/theme.svelte";
+
+  function toggleTheme() {
+    themeState.current = themeState.current === "light" ? "dark" : "light";
+  }
+</script>
+
+<button onclick={toggleTheme}>Theme: {themeState.current}</button>
+```
+
+Theme tokens continue to be consumed with `tVar`; the active store value chooses
+which theme scope provides the variables.
+
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts">
+  import ink, { tVar } from "@kraken/ink";
+
+  let { children } = $props();
+
+  const styles = new ink();
+
+  styles.global = {
+    body: {
+      background: tVar.site.bg,
+      color: tVar.site.fg,
+    },
+  };
+</script>
+
+{@render children()}
+```
+
 For React or TanStack Start, pass a subscribable store such as one with
-`subscribe` plus `getSnapshot`, `getState`, `get`, or `state`. Store values
-should match the keys in `themes`. Because the store bridge imports
-`ink.config.ts` in the client bundle, keep the store-backed config and its
-imports browser-safe.
+`subscribe` plus `getSnapshot`, `getState`, `get`, or `state`, export it from a
+shared module, and update it through that store's setter. Store values should
+match the keys in `themes`. Because the store bridge imports `ink.config.ts` in
+the client bundle, keep the store-backed config and its imports browser-safe.
 
 ### React theme helper
 
