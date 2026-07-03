@@ -22,8 +22,9 @@ function assertDistGuards() {
     "dist/vite.js must not require npm:typescript",
   );
   assert(
-    code.includes("createRequire(import.meta.url)"),
-    "dist/vite.js must bootstrap node require via createRequire",
+    code.includes("getRequireBaseCandidates(import.meta.url)") &&
+      code.includes("createRequire(base)"),
+    "dist/vite.js must bootstrap node require through safe require base candidates",
   );
   assert(
     code.includes('requireFn("typescript")'),

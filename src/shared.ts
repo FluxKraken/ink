@@ -1104,6 +1104,49 @@ function getFallbackRequire(): NodeRequire | null {
   }
 }
 
+function getCurrentWorkingDirectory(): string | null {
+  const processValue = (globalThis as { process?: { cwd?: unknown } }).process;
+  if (processValue && typeof processValue.cwd === "function") {
+    try {
+      const cwd = processValue.cwd();
+      if (typeof cwd === "string" && cwd.length > 0) {
+        return cwd;
+      }
+    } catch {
+      // Fall through to Deno's cwd API below.
+    }
+  }
+
+  const denoValue = (globalThis as { Deno?: { cwd?: unknown } }).Deno;
+  if (denoValue && typeof denoValue.cwd === "function") {
+    try {
+      const cwd = denoValue.cwd();
+      if (typeof cwd === "string" && cwd.length > 0) {
+        return cwd;
+      }
+    } catch {
+      // No cwd is available in this runtime.
+    }
+  }
+
+  return null;
+}
+
+function getRequireBaseCandidates(moduleUrl: string): string[] {
+  const candidates: string[] = [];
+  if (moduleUrl.startsWith("file:")) {
+    candidates.push(moduleUrl);
+  }
+
+  const cwd = getCurrentWorkingDirectory();
+  if (cwd) {
+    const base = cwd.replace(/[\\/]$/, "");
+    candidates.push(`${base}/noop.js`);
+  }
+
+  return candidates;
+}
+
 function getNodeRequire(): NodeRequire | null {
   if (nodeRequire !== undefined) {
     return nodeRequire;
@@ -1111,8 +1154,14 @@ function getNodeRequire(): NodeRequire | null {
 
   const moduleBuiltin = getBuiltinModule("node:module") as NodeModule | null;
   if (moduleBuiltin && typeof moduleBuiltin.createRequire === "function") {
-    nodeRequire = moduleBuiltin.createRequire(import.meta.url);
-    return nodeRequire;
+    for (const base of getRequireBaseCandidates(import.meta.url)) {
+      try {
+        nodeRequire = moduleBuiltin.createRequire(base);
+        return nodeRequire;
+      } catch {
+        // Try the next require base before falling back to global require.
+      }
+    }
   }
 
   nodeRequire = getFallbackRequire();
