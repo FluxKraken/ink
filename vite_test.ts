@@ -38,8 +38,8 @@ import {
 (globalThis as Record<string, unknown>).__ink_tailwind_merge__ = twMerge;
 
 const VIRTUAL_ID = "\0virtual:ink/styles.css";
-const TAILWIND_RUNTIME_VIRTUAL_ID = "\0virtual:ink/tailwind-merge";
-const THEME_STORE_RUNTIME_VIRTUAL_ID = "\0virtual:ink/theme-store";
+const TAILWIND_RUNTIME_VIRTUAL_ID = "\0virtual:ink/tailwind-merge.js";
+const THEME_STORE_RUNTIME_VIRTUAL_ID = "\0virtual:ink/theme-store.js";
 const SVELTE_THEME_STORE_RUNTIME_VIRTUAL_ID =
   "\0virtual:ink/theme-store.svelte.ts";
 const MODULE_VIRTUAL_QUERY_KEY = "ink-module";
@@ -330,6 +330,20 @@ function assertPackageTypesSucceed(source: string): void {
     Deno.removeSync(tempDir, { recursive: true });
   }
 }
+
+Deno.test("vite resolves JavaScript virtual runtime modules with JS-shaped ids", () => {
+  const plugin = inkVite();
+  const resolveId = asHook(plugin.resolveId);
+
+  assertEquals(
+    resolveId("virtual:ink/tailwind-merge"),
+    TAILWIND_RUNTIME_VIRTUAL_ID,
+  );
+  assertEquals(
+    resolveId("virtual:ink/theme-store"),
+    THEME_STORE_RUNTIME_VIRTUAL_ID,
+  );
+});
 
 Deno.test("injects component CSS for direct ink usage in svelte", () => {
   const plugin = inkVite();
@@ -1021,6 +1035,59 @@ Deno.test("injects plain virtual import when JS-shaped astro input uses new ink(
   );
   assert(!code.startsWith("---\n"));
   assert(!code.includes("new ink()"));
+});
+
+Deno.test("injects plain virtual import when JS-shaped astro input starts with async function", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+
+  const source =
+    `async function loadPageData() {\n  return { title: "Home" };\n}\n` +
+    `const styles = { card() { return ""; } };\n` +
+    `const className = styles();\n`;
+
+  const transformed = transform(
+    source,
+    "/app/src/pages/async-js-shaped.astro",
+  );
+  assert(
+    transformed && typeof transformed === "object" && "code" in transformed,
+  );
+
+  const code = transformed.code as string;
+  assert(code.startsWith('import "virtual:ink/styles.css";\nasync function'));
+  assert(!code.startsWith("---\n"));
+});
+
+Deno.test("recognizes Astro transform ids with URL fragments", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/layouts`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { rootLayout: "./src/layouts/Base.astro" };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `---\nconst title = "Home";\n---\n<slot />`,
+      `${root}/src/layouts/Base.astro#astro`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(code.startsWith('---\nimport "virtual:ink/styles.css";'));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
 });
 
 Deno.test("module-scoped virtual CSS survives early shared virtual load ordering", () => {

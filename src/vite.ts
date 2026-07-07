@@ -45,9 +45,9 @@ import {
 const PUBLIC_VIRTUAL_ID = "virtual:ink/styles.css";
 const RESOLVED_VIRTUAL_ID = "\0virtual:ink/styles.css";
 const PUBLIC_TAILWIND_RUNTIME_ID = "virtual:ink/tailwind-merge";
-const RESOLVED_TAILWIND_RUNTIME_ID = "\0virtual:ink/tailwind-merge";
+const RESOLVED_TAILWIND_RUNTIME_ID = "\0virtual:ink/tailwind-merge.js";
 const PUBLIC_THEME_STORE_RUNTIME_ID = "virtual:ink/theme-store";
-const RESOLVED_THEME_STORE_RUNTIME_ID = "\0virtual:ink/theme-store";
+const RESOLVED_THEME_STORE_RUNTIME_ID = "\0virtual:ink/theme-store.js";
 const PUBLIC_SVELTE_THEME_STORE_RUNTIME_ID =
   "virtual:ink/theme-store.svelte.ts";
 const RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID =
@@ -646,7 +646,7 @@ const STATIC_EVAL_GLOBALS: Record<string, unknown> = {
 };
 
 function cleanId(id: string): string {
-  return id.replace(/\?.*$/, "");
+  return id.replace(/[?#].*$/, "");
 }
 
 function supportsTransform(id: string): boolean {
@@ -973,8 +973,7 @@ function addVirtualImportToAstro(
     );
   }
 
-  const trimmed = code.trimStart();
-  if (/^(?:import|export|const|let|var|function|class)\b/.test(trimmed)) {
+  if (isJsShapedAstroInput(code)) {
     return addVirtualImport(code, importId);
   }
 
@@ -4023,11 +4022,13 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     invalidatedModules?: Set<unknown>,
   ): unknown[] {
     const invalidated = new Set<unknown>();
-    for (const virtualId of [
-      RESOLVED_VIRTUAL_ID,
-      RESOLVED_THEME_STORE_RUNTIME_ID,
-      RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID,
-    ]) {
+    for (
+      const virtualId of [
+        RESOLVED_VIRTUAL_ID,
+        RESOLVED_THEME_STORE_RUNTIME_ID,
+        RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID,
+      ]
+    ) {
       for (
         const module of invalidateModuleById(
           virtualId,

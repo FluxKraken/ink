@@ -64,7 +64,15 @@ By default the plugin transforms files inside `<project-root>/src/**` and
 `<project-root>/app/**` (for frameworks like TanStack Start). You can extend
 that with `include` in `ink.config.ts`.
 
-Astro uses the same plugin through `astro.config.mjs`:
+For a new Astro 7 project, install Ink into the Astro app and register the
+plugin through Astro's `vite` option. Astro does not need a separate
+`vite.config.ts`.
+
+```bash
+npm create astro@latest my-site
+cd my-site
+npx jsr add @kraken/ink
+```
 
 ```js
 // astro.config.mjs
@@ -76,6 +84,50 @@ export default defineConfig({
     plugins: [inkVite()],
   },
 });
+```
+
+If the app uses the default Astro starter layout, point Ink at that root layout
+so project-wide imports, themes, utilities, and store-backed themes are wired
+once for the whole app:
+
+```ts
+// ink.config.ts
+import { defineInkConfig } from "@kraken/ink";
+
+export default defineInkConfig({
+  rootLayout: "./src/layouts/Layout.astro",
+});
+```
+
+Use your actual layout path if the app keeps layouts somewhere else. If the app
+does not have a shared layout, each `.astro` component or page that uses Ink can
+still import and use styles directly.
+
+In an Astro component, create the builder in frontmatter and pass the generated
+class string to Astro's `class` attribute:
+
+```astro
+---
+import ink from "@kraken/ink";
+
+const styles = new ink();
+
+styles.base = {
+  card: {
+    display: "grid",
+    gap: "1rem",
+    padding: "1rem",
+  },
+  title: {
+    fontSize: "1.25rem",
+    fontWeight: 700,
+  },
+};
+---
+
+<article class={styles.card()}>
+  <h2 class={styles.title()}>Hello Astro</h2>
+</article>
 ```
 
 TanStack Start can register the same plugin in `app.config.ts`:

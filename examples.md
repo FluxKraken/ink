@@ -161,10 +161,17 @@ styles.base = {
 };
 ```
 
-## Astro setup
+## Astro 7 setup
 
-Astro does not usually have its own `vite.config.ts`, so register the plugin
-through Astro's `vite` option.
+Start with a normal Astro 7 app, add Ink with the JSR helper, then register the
+Vite plugin through Astro's config. Astro does not usually have its own
+`vite.config.ts`.
+
+```bash
+npm create astro@latest my-site
+cd my-site
+npx jsr add @kraken/ink
+```
 
 ```js
 // astro.config.mjs
@@ -176,6 +183,52 @@ export default defineConfig({
     plugins: [inkVite()],
   },
 });
+```
+
+For the default Astro starter layout, add `ink.config.ts` at the project root
+and point `rootLayout` at the real `.astro` file path:
+
+```ts
+// ink.config.ts
+import { defineInkConfig } from "@kraken/ink";
+
+export default defineInkConfig({
+  rootLayout: "./src/layouts/Layout.astro",
+});
+```
+
+`rootLayout` lets Ink inject the shared stylesheet and theme-store bridge at the
+layout level, even when the layout itself does not call `new ink()`. Use your
+actual layout path if the app keeps layouts somewhere else.
+
+You normally do not import `virtual:ink/styles.css` by hand in Astro. The
+plugin adds it to the configured root layout or to Astro files that use Ink
+styles directly.
+
+Create styles in Astro frontmatter and apply them with `class={...}`:
+
+```astro
+---
+import ink from "@kraken/ink";
+
+const styles = new ink();
+
+styles.base = {
+  card: {
+    display: "grid",
+    gap: "1rem",
+    padding: "1rem",
+  },
+  title: {
+    fontSize: "1.25rem",
+    fontWeight: 700,
+  },
+};
+---
+
+<article class={styles.card()}>
+  <h2 class={styles.title()}>Hello Astro</h2>
+</article>
 ```
 
 ## TanStack Start setup
