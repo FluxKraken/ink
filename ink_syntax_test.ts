@@ -227,6 +227,50 @@ export default {
   });
 });
 
+Deno.test(".ink compiler preserves Theme constructors and explicit references", async () => {
+  const source = `class Theme {
+  constructor(tokens) { this.tokens = tokens }
+}
+
+const fluxBlue = hsl(200 100% 50%)
+const fluxYellow = hsl(60 80% 80%)
+const background = linear-gradient(147deg, =fluxBlue, =fluxYellow)
+
+const fluxLight = new Theme({
+  site: {
+    bg: =background
+    fg: black
+  }
+})
+
+export default {
+  light: =fluxLight
+} as const
+`;
+
+  const compiled = compileInkModule(source, "/app/src/theme.ink");
+  const themeDeclaration = compiled.ast.preamble.find((node) =>
+    node.kind === "const-declaration" && node.name === "fluxLight"
+  );
+  assert(themeDeclaration?.kind === "const-declaration");
+  assertEquals(themeDeclaration.value.kind, "new-expression");
+
+  const exportedTheme = compiled.ast.defaultExport.entries[0]?.value;
+  assertEquals(exportedTheme?.kind, "expression");
+  assertStringIncludes(compiled.code, "const fluxLight = new Theme({");
+  assertStringIncludes(compiled.code, "light: fluxLight");
+
+  const evaluated = await executeDefaultExport(source) as {
+    light: { tokens: { site: { bg: string; fg: string } } };
+  };
+  assertEquals(evaluated.light.tokens, {
+    site: {
+      bg: "linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%))",
+      fg: "black",
+    },
+  });
+});
+
 Deno.test(".ink compiler supports multiple and braced inline interpolations", async () => {
   const source = `const startColor = "#102030"
 const endColor = "#405060"

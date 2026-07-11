@@ -198,6 +198,26 @@ export default {
 } as const
 ```
 
+Object-based constructor calls also use the relaxed object syntax. This makes
+theme modules work without quoting CSS values or adding object commas. Use `=`
+when exporting local theme constants, just like any other JavaScript expression:
+
+```ink
+import { Theme } from "@kraken/ink"
+
+const surface = linear-gradient(147deg, #00aaff, #fff6a3)
+const light = new Theme({
+  site: {
+    background: =surface
+    foreground: black
+  }
+})
+
+export default {
+  light: =light
+} as const
+```
+
 Prefix the whole value with `=` when it is a JavaScript expression. Inside a
 larger CSS value, use `={expression}` for a complex expression. The same rule
 applies to constants, for example `const pageWidth = =tokens.pageWidth`:

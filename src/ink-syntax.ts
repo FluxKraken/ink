@@ -67,6 +67,13 @@ export type InkExpressionNode = {
   span: InkSourceSpan;
 };
 
+export type InkNewExpressionNode = {
+  kind: "new-expression";
+  callee: string;
+  argument: InkObjectNode;
+  span: InkSourceSpan;
+};
+
 export type InkInterpolatedCssTextNode = {
   kind: "css-text";
   value: string;
@@ -96,6 +103,7 @@ export type InkValueNode =
   | InkNumberNode
   | InkBooleanNode
   | InkExpressionNode
+  | InkNewExpressionNode
   | InkInterpolatedCssNode;
 
 export type InkRawModuleNode = {
@@ -914,6 +922,11 @@ class InkParser {
     if (char === "{") return this.parseObject();
     if (char === "[") return this.parseArray();
 
+    if (char === "n") {
+      const newExpression = this.tryParseNewObjectExpression();
+      if (newExpression) return newExpression;
+    }
+
     if (char === '"' || char === "'") {
       const parsed = parseEscapedString(this.source, start, this.id);
       this.index = parsed.end;
@@ -987,6 +1000,47 @@ class InkParser {
       kind: "css-literal",
       value: raw,
       span: { start, end: contentBounds.end },
+    };
+  }
+
+  private tryParseNewObjectExpression(): InkNewExpressionNode | null {
+    const start = this.index;
+    const newToken = readIdentifier(this.source, start);
+    if (newToken.value !== "new") return null;
+
+    let cursor = skipInlineTriviaAt(
+      this.source,
+      newToken.end,
+      this.source.length,
+      this.id,
+    );
+    if (!isIdentifierStart(this.source[cursor])) return null;
+    const calleeToken = readIdentifier(this.source, cursor);
+    cursor = skipInlineTriviaAt(
+      this.source,
+      calleeToken.end,
+      this.source.length,
+      this.id,
+    );
+    if (this.source[cursor] !== "(") return null;
+
+    this.index = cursor + 1;
+    this.skipValueTrivia();
+    if (this.source[this.index] !== "{") {
+      this.index = start;
+      return null;
+    }
+
+    const argument = this.parseObject();
+    this.skipValueTrivia();
+    this.expect(")", "Expected ')' after constructor object");
+    this.index += 1;
+
+    return {
+      kind: "new-expression",
+      callee: calleeToken.value,
+      argument,
+      span: { start, end: this.index },
     };
   }
 
@@ -1439,6 +1493,8 @@ function emitValue(value: InkValueNode, indentation: number): string {
       return String(value.value);
     case "expression":
       return value.source;
+    case "new-expression":
+      return `new ${value.callee}(${emitObject(value.argument, indentation)})`;
     case "interpolated-css":
       return emitInterpolatedCss(value);
   }

@@ -5146,6 +5146,96 @@ Deno.test("loads ink.config.ts themes into the shared stylesheet", () => {
   }
 });
 
+Deno.test("loads relaxed .ink Theme modules and global rules from config", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const stylesDir = `${root}/src/lib/styles`;
+    Deno.mkdirSync(stylesDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${stylesDir}/theme.ink`,
+      `import { Theme } from "@kraken/ink"
+
+const fluxBlue = hsl(200 100% 50%)
+const fluxYellow = hsl(60 80% 80%)
+const background = linear-gradient(147deg, =fluxBlue, =fluxYellow)
+
+const fluxLight = new Theme({
+  site: {
+    bg: =background
+    fg: black
+  }
+})
+
+const fluxDark = new Theme({
+  site: {
+    bg: =background
+    fg: white
+  }
+})
+
+export default {
+  light: =fluxLight
+  dark: =fluxDark
+} as const
+`,
+    );
+    Deno.writeTextFileSync(
+      `${stylesDir}/general.ink`,
+      `import { tVar } from "@kraken/ink"
+
+export default {
+  body: {
+    background: =tVar.site.bg
+    color: =tVar.site.fg
+  }
+} as const
+`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import General from "./src/lib/styles/general.ink";
+import SiteTheme from "./src/lib/styles/theme.ink";
+
+export default {
+  import: [{ rules: General, layer: "general" }],
+  themeMode: "store",
+  themes: SiteTheme,
+  resolution: "static",
+};
+`,
+    );
+
+    const plugin = inkVite();
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(
+      css.includes(
+        '@scope ([data-ink-theme="light"]){:scope{--site-bg:linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%));--site-fg:black}}',
+      ),
+      css,
+    );
+    assert(
+      css.includes(
+        '@scope ([data-ink-theme="dark"]){:scope{--site-bg:linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%));--site-fg:white}}',
+      ),
+      css,
+    );
+    assert(
+      css.includes(
+        "@layer general{body{background:var(--site-bg);color:var(--site-fg)}}",
+      ),
+      css,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("loads image() theme values from imported ink.config.ts theme modules", () => {
   const root = Deno.makeTempDirSync();
 
