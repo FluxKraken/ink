@@ -218,6 +218,23 @@ export default {
 } as const
 ```
 
+End a line with a standalone `_` to continue a long CSS value on the next
+line. The continuation marker, newline, and indentation are omitted from the
+compiled value:
+
+```ink
+const gradients = {
+  background: linear-gradient( _
+    147deg, _
+    hsl(200 100% 50%), _
+    hsl(60 80% 80%) _
+  )
+}
+```
+
+An underscore attached to an identifier, such as `token_`, remains part of the
+CSS value.
+
 Prefix the whole value with `=` when it is a JavaScript expression. Inside a
 larger CSS value, use `={expression}` for a complex expression. The same rule
 applies to constants, for example `const pageWidth = =tokens.pageWidth`:

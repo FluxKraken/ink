@@ -5158,7 +5158,11 @@ Deno.test("loads relaxed .ink Theme modules and global rules from config", () =>
 
 const fluxBlue = hsl(200 100% 50%)
 const fluxYellow = hsl(60 80% 80%)
-const background = linear-gradient(147deg, =fluxBlue, =fluxYellow)
+const background = linear-gradient( _
+  147deg, _
+  =fluxBlue, _
+  =fluxYellow _
+)
 
 const fluxLight = new Theme({
   site: {

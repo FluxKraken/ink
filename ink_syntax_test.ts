@@ -165,6 +165,47 @@ export default {
   });
 });
 
+Deno.test(".ink compiler joins underscore-continued CSS lines", async () => {
+  const source = `const fluxGradients = {
+  background: linear-gradient( _
+    147deg, _
+    hsl(200 100% 50%), _
+    hsl(60 80% 80%) _
+  )
+  title: linear-gradient( _
+    to left, _
+    hsl(200 100% 50%), _
+    hsl(60 80% 80%) _
+  )
+}
+
+export default {
+  card: {
+    background: =fluxGradients.background
+    boxShadow: 0 1px 2px _
+      black
+    customToken: token_
+  }
+} as const
+`;
+
+  const compiled = compileInkModule(source, "/app/src/gradients.ink");
+  assert(!compiled.code.includes("_\n"));
+  assertStringIncludes(
+    compiled.code,
+    'background: "linear-gradient( 147deg, hsl(200 100% 50%), hsl(60 80% 80%) )"',
+  );
+
+  assertEquals(await executeDefaultExport(source), {
+    card: {
+      background:
+        "linear-gradient( 147deg, hsl(200 100% 50%), hsl(60 80% 80%) )",
+      boxShadow: "0 1px 2px black",
+      customToken: "token_",
+    },
+  });
+});
+
 Deno.test(".ink compiler keeps a whole-value escape as an expression", async () => {
   const source = `const pageWidth = 70rem
 

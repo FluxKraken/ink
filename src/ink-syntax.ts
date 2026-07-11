@@ -542,6 +542,51 @@ function trimValueBounds(
   return { start, end };
 }
 
+function findLineContinuationMarker(
+  source: string,
+  lineEnd: number,
+  valueStart: number,
+): number | null {
+  let marker = lineEnd - 1;
+  while (marker >= valueStart && isHorizontalWhitespace(source[marker])) {
+    marker -= 1;
+  }
+  if (marker < valueStart || source[marker] !== "_") return null;
+
+  const previous = source[marker - 1];
+  if (isIdentifierPart(previous) || previous === "-") return null;
+  return marker;
+}
+
+function normalizeCssLineContinuations(value: string): string {
+  let output = "";
+  let cursor = 0;
+  let lineStart = 0;
+
+  while (cursor < value.length) {
+    if (!isNewline(value[cursor])) {
+      cursor += 1;
+      continue;
+    }
+
+    const marker = findLineContinuationMarker(value, cursor, lineStart);
+    if (marker === null) {
+      cursor += value[cursor] === "\r" && value[cursor + 1] === "\n" ? 2 : 1;
+      continue;
+    }
+
+    output += value.slice(lineStart, marker);
+    cursor += value[cursor] === "\r" && value[cursor + 1] === "\n" ? 2 : 1;
+    while (cursor < value.length && isHorizontalWhitespace(value[cursor])) {
+      cursor += 1;
+    }
+    lineStart = cursor;
+  }
+
+  if (lineStart === 0) return value;
+  return output + value.slice(lineStart);
+}
+
 function findMatchingDelimiter(
   source: string,
   openIndex: number,
@@ -718,7 +763,9 @@ function parseInterpolatedCss(
     if (textStart < cursor) {
       parts.push({
         kind: "css-text",
-        value: source.slice(textStart, cursor),
+        value: normalizeCssLineContinuations(
+          source.slice(textStart, cursor),
+        ),
         span: { start: textStart, end: cursor },
       });
     }
@@ -735,7 +782,7 @@ function parseInterpolatedCss(
   if (textStart < end) {
     parts.push({
       kind: "css-text",
-      value: source.slice(textStart, end),
+      value: normalizeCssLineContinuations(source.slice(textStart, end)),
       span: { start: textStart, end },
     });
   }
@@ -998,7 +1045,7 @@ class InkParser {
     if (interpolated) return interpolated;
     return {
       kind: "css-literal",
-      value: raw,
+      value: normalizeCssLineContinuations(raw),
       span: { start, end: contentBounds.end },
     };
   }
@@ -1169,6 +1216,16 @@ class InkParser {
         bracketDepth === 0 &&
         braceDepth === 0
       ) {
+        if (
+          findLineContinuationMarker(
+            this.source,
+            cursor,
+            this.index,
+          ) !== null
+        ) {
+          cursor += char === "\r" && this.source[cursor + 1] === "\n" ? 2 : 1;
+          continue;
+        }
         return cursor;
       }
       cursor += 1;
