@@ -1,6 +1,6 @@
 {
   "name": "@kraken/ink",
-  "version": "0.6.02",
+  "version": "0.6.11",
   "license": "MIT",
   "nodeModulesDir": "auto",
   "exports": {
