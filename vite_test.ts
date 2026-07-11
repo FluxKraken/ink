@@ -310,7 +310,7 @@ function assertPackageTypesSucceed(source: string): void {
         "run",
         "--node-modules-dir=auto",
         "-A",
-        "npm:typescript/bin/tsc",
+        `npm:typescript@${TypeScript.version}/tsc`,
         "-p",
         "tsconfig.json",
         "--noEmit",
