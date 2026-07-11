@@ -1,3 +1,5 @@
+/// <reference path="./ink.d.ts" />
+
 import {
   ApplyInput,
   ContainerSetInput,

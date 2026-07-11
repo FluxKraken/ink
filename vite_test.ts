@@ -20,6 +20,7 @@ import {
   findNewInkDeclarations,
   parseInkCallArguments,
   parseInkConfig,
+  parseStaticExpression,
 } from "./src/parser.ts";
 import {
   cVar,
@@ -284,7 +285,14 @@ function assertPackageTypesSucceed(source: string): void {
       }),
     );
 
-    for (const file of ["mod.d.ts", "dist/shared.d.ts", "dist/vite.d.ts"]) {
+    for (
+      const file of [
+        "ink.d.ts",
+        "mod.d.ts",
+        "dist/shared.d.ts",
+        "dist/vite.d.ts",
+      ]
+    ) {
       const sourcePath = join(repoRoot, file);
       const targetPath = join(packageRoot, file);
       Deno.mkdirSync(dirname(targetPath), { recursive: true });
@@ -2455,6 +2463,17 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
     };
 
     styles.header();
+  `);
+});
+
+Deno.test("published types accept .ink style module imports", () => {
+  assertPackageTypesSucceed(`
+    import ink from "@kraken/ink";
+    import reset from "./reset.ink";
+
+    const styles = new ink();
+    styles.global = reset;
+    styles.base = reset;
   `);
 });
 
@@ -5988,6 +6007,288 @@ Deno.test("loads ink.config.ts barrel imports through resolve.alias", () => {
     assertMatch(
       css,
       /@media \(width >= 72rem\)\{\.ink_[a-z0-9]+\{text-align:justify\}\}/,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite compiles explicit .ink modules with relaxed style syntax", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const moduleId = `${root}/globals.ink`;
+    configResolved({ root, resolve: { alias: [] } });
+
+    const source = `import { palette } from "./tokens.ts"
+export default {
+  *, *::before, *::after: {
+    boxSizing: border-box
+    margin: 0
+    color: =palette.text
+  }
+
+  body: {
+    fontFamily: [system-ui, sans-serif]
+  }
+  h1, h2: {
+    lineHeight: 1.1
+  }
+} as const
+`;
+    Deno.writeTextFileSync(moduleId, source);
+
+    const loaded = load(moduleId);
+    const loadedCode = typeof loaded === "string"
+      ? loaded
+      : loaded && typeof loaded === "object" && "code" in loaded
+      ? String(loaded.code)
+      : source;
+    const transformed = transform(loadedCode, moduleId);
+    const code = transformed && typeof transformed === "object" &&
+        "code" in transformed
+      ? String(transformed.code)
+      : loaded === null || loaded === undefined
+      ? null
+      : loadedCode;
+    assert(code !== null);
+
+    const moduleInfo = parseModuleStaticInfo(
+      code,
+      `${moduleId}.ts`,
+      TEST_TYPESCRIPT,
+    );
+    assert(moduleInfo.defaultExportExpression !== null);
+
+    const compiled = parseStaticExpression(
+      moduleInfo.defaultExportExpression,
+      (identifierPath) =>
+        identifierPath.join(".") === "palette.text" ? "#102030" : undefined,
+    );
+    assertEquals(compiled, {
+      "*, *::before, *::after": {
+        boxSizing: "border-box",
+        margin: 0,
+        color: "#102030",
+      },
+      body: {
+        fontFamily: ["system-ui", "sans-serif"],
+      },
+      "h1, h2": {
+        lineHeight: 1.1,
+      },
+    });
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("extracts global CSS from an explicitly imported .ink module", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const configureServer = asHook(plugin.configureServer);
+  const handleHotUpdate = asHook(plugin.handleHotUpdate);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const libDir = `${root}/src/lib`;
+    const rulesId = `${libDir}/globals.ink`;
+    const tokensId = `${libDir}/tokens.ts`;
+    const appId = `${libDir}/app.ts`;
+    Deno.mkdirSync(libDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      tokensId,
+      `export const palette = { text: "#102030" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      rulesId,
+      `import { palette } from "./tokens.ts"
+export default {
+  *, *::before, *::after: {
+    boxSizing: border-box
+    margin: 0
+    color: =palette.text
+  }
+
+  body: {
+    fontFamily: [system-ui, sans-serif]
+  }
+  h1, h2: {
+    lineHeight: 1.1
+  }
+} as const
+`,
+    );
+
+    const invalidated: string[] = [];
+    configResolved({ root, resolve: { alias: [] } });
+    configureServer({
+      moduleGraph: {
+        getModuleById: (id: string) => ({ id }),
+        invalidateModule: (module: { id: string }) => {
+          invalidated.push(module.id);
+        },
+      },
+    });
+
+    const moduleCode = `import ink from "@kraken/ink";\n` +
+      `import globalRules from "./globals.ink";\n` +
+      `const styles = new ink();\n` +
+      `styles.global = globalRules;\n` +
+      `styles.base = { page: { display: grid } };\n`;
+    const watched: string[] = [];
+    const transformed = transform.call(
+      {
+        addWatchFile: (id: string) => watched.push(id),
+      },
+      moduleCode,
+      appId,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(!code.includes("styles.global ="));
+    assert(watched.includes(rulesId));
+    assert(watched.includes(tokensId));
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(
+      css.includes(
+        "*, *::before, *::after{box-sizing:border-box;margin:0px;color:#102030}",
+      ),
+      css,
+    );
+    assert(css.includes("body{font-family:system-ui, sans-serif}"), css);
+    assert(css.includes("h1, h2{line-height:1.1}"), css);
+    assertMatch(css, /\.ink_[a-z0-9]+\{display:grid\}/);
+
+    handleHotUpdate({ file: rulesId });
+    assert(invalidated.includes(appId));
+    assert(invalidated.includes(VIRTUAL_ID));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("resolves extensionless .ink modules as static dependencies", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const resolveId = asHook(plugin.resolveId);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const libDir = `${root}/src/lib`;
+    const rulesId = `${libDir}/reset.ink`;
+    const appId = `${libDir}/app.ts`;
+    Deno.mkdirSync(libDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      rulesId,
+      `export default {
+  html: {
+    boxSizing: border-box
+  }
+} as const
+`,
+    );
+
+    configResolved({ root, resolve: { alias: [] } });
+    assertEquals(resolveId("./reset", appId), rulesId);
+
+    const moduleCode = `import ink from "@kraken/ink";\n` +
+      `import reset from "./reset";\n` +
+      `const styles = new ink();\n` +
+      `styles.global = reset;\n`;
+    const watched: string[] = [];
+    const transformed = transform.call(
+      {
+        addWatchFile: (id: string) => watched.push(id),
+      },
+      moduleCode,
+      appId,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    assert(watched.includes(rulesId));
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes("html{box-sizing:border-box}"), css);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("extracts an interpolated .ink const through styles.base", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const libDir = `${root}/src/lib`;
+    const stylesId = `${libDir}/page.ink`;
+    const appId = `${libDir}/app.ts`;
+    Deno.mkdirSync(libDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      stylesId,
+      `const pageWidth = 70rem
+
+export default {
+  page: {
+    width: min(=pageWidth, 100%)
+  }
+}
+`,
+    );
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink from "@kraken/ink";\n` +
+      `import pageStyles from "./page.ink";\n` +
+      `const styles = new ink();\n` +
+      `styles.base = pageStyles;\n`;
+    const watched: string[] = [];
+    const transformed = transform.call(
+      {
+        addWatchFile: (id: string) => watched.push(id),
+      },
+      moduleCode,
+      appId,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    assert(watched.includes(stylesId));
+    const code = transformed.code as string;
+    assert(!code.includes("styles.base ="));
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(
+      css,
+      /\.ink_[a-z0-9]+\{width:min\(70rem, 100%\)\}/,
     );
   } finally {
     Deno.removeSync(root, { recursive: true });

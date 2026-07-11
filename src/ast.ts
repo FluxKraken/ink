@@ -117,6 +117,7 @@ function scriptKindForModule(
     cleanId.endsWith(".ts") ||
     cleanId.endsWith(".mts") ||
     cleanId.endsWith(".cts") ||
+    cleanId.endsWith(".ink") ||
     cleanId.endsWith(".svelte") ||
     cleanId.endsWith(".astro")
   ) {

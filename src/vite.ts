@@ -41,6 +41,7 @@ import {
   type ModuleStaticInfo,
   parseModuleStaticInfo,
 } from "./ast.js";
+import { compileInkModule } from "./ink-syntax.js";
 
 const PUBLIC_VIRTUAL_ID = "virtual:ink/styles.css";
 const RESOLVED_VIRTUAL_ID = "\0virtual:ink/styles.css";
@@ -63,6 +64,7 @@ const STATIC_STYLE_EXTENSIONS = [
   ".cjs",
   ".mts",
   ".cts",
+  ".ink",
 ];
 const IMAGE_ASSET_EXTENSIONS = new Set([
   ".apng",
@@ -649,8 +651,58 @@ function cleanId(id: string): string {
   return id.replace(/[?#].*$/, "");
 }
 
+function isInkModuleId(id: string): boolean {
+  return cleanId(id).endsWith(".ink");
+}
+
+function compileStaticModuleSource(source: string, id: string): string {
+  return isInkModuleId(id) ? compileInkModule(source, id).code : source;
+}
+
+function resolveExtensionlessInkImport(
+  source: string,
+  importer: string | undefined,
+): string | null {
+  if (!importer || importer.startsWith("\0")) {
+    return null;
+  }
+
+  const cleanSource = cleanId(source);
+  const path = getNodePath();
+  if (
+    path.extname(cleanSource) ||
+    (!cleanSource.startsWith(".") && !path.isAbsolute(cleanSource))
+  ) {
+    return null;
+  }
+
+  const importerPath = cleanId(importer);
+  const basePath = path.isAbsolute(cleanSource)
+    ? cleanSource
+    : path.resolve(path.dirname(importerPath), cleanSource);
+  const suffix = source.slice(cleanSource.length);
+  for (
+    const jsonCandidate of [
+      `${basePath}.json`,
+      path.join(basePath, "index.json"),
+    ]
+  ) {
+    if (
+      getNodeFs().existsSync(jsonCandidate) &&
+      getNodeFs().statSync(jsonCandidate).isFile()
+    ) {
+      return null;
+    }
+  }
+
+  const resolvedFile = resolveFileFromBase(basePath);
+  return resolvedFile && isInkModuleId(resolvedFile)
+    ? `${path.normalize(resolvedFile)}${suffix}`
+    : null;
+}
+
 function supportsTransform(id: string): boolean {
-  return /\.(?:[jt]sx?|svelte|astro)$/.test(cleanId(id));
+  return /\.(?:[jt]sx?|svelte|astro|ink)$/.test(cleanId(id));
 }
 
 const INK_IMPORT_SOURCES = [
@@ -2378,12 +2430,14 @@ function loadInkConfig(
       if (moduleId === configPath) {
         return source;
       }
+      let moduleSource: string;
       try {
         dependencies.add(cleanId(moduleId));
-        return getNodeFs().readFileSync(moduleId, "utf8");
+        moduleSource = getNodeFs().readFileSync(moduleId, "utf8");
       } catch {
         return null;
       }
+      return compileStaticModuleSource(moduleSource, moduleId);
     },
     resolveImportFile: (moduleId, importSource) =>
       resolveImportToFile(moduleId, importSource, resolverOptions),
@@ -4101,7 +4155,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       initializeResolvers(viteRoot);
     },
 
-    resolveId(id: string) {
+    resolveId(id: string, importer?: string) {
       if (cleanId(id) === PUBLIC_VIRTUAL_ID) {
         const suffix = id.slice(PUBLIC_VIRTUAL_ID.length);
         return `${RESOLVED_VIRTUAL_ID}${suffix}`;
@@ -4114,6 +4168,10 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       }
       if (cleanId(id) === PUBLIC_SVELTE_THEME_STORE_RUNTIME_ID) {
         return RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID;
+      }
+      const resolvedInkModule = resolveExtensionlessInkImport(id, importer);
+      if (resolvedInkModule) {
+        return resolvedInkModule;
       }
       return null;
     },
@@ -4156,17 +4214,20 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       if (!supportsTransform(normalizedId)) {
         return null;
       }
+      const isInkModule = isInkModuleId(normalizedId);
       const isRootLayout = isConfiguredRootLayout(
         normalizedId,
         inkConfig.rootLayout,
         viteRoot,
       );
       if (
+        !isInkModule &&
         options.include && !options.include.test(normalizedId) && !isRootLayout
       ) {
         return null;
       }
       if (
+        !isInkModule &&
         !options.include &&
         !isRootLayout &&
         !isInDefaultTransformScope(
@@ -4180,9 +4241,13 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       }
       const isSvelte = normalizedId.endsWith(".svelte");
       const isAstro = normalizedId.endsWith(".astro");
-      let nextCode = code;
+      const inkCompilation = isInkModule
+        ? compileInkModule(code, normalizedId)
+        : null;
+      const transformInputCode = inkCompilation?.code ?? code;
+      let nextCode = transformInputCode;
       const sourceRegions = extractTransformSourceRegions(
-        code,
+        transformInputCode,
         normalizedId,
         { isSvelte, isAstro, projectRoot, viteRoot },
       );
@@ -4192,6 +4257,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         collectLegacyTransformTargetsFromRegions(sourceRegions);
       const newInkDecls: AstNewInkDeclaration[] = transformTargets.newInkDecls;
       const calls = transformTargets.calls;
+
+      const transformedModule = (moduleCode: string) => ({
+        code: moduleCode,
+        map: null,
+      });
+
       if (calls.length === 0 && newInkDecls.length === 0) {
         if (isRootLayout) {
           const didVirtualCssChange = clearManagedModuleState(normalizedId);
@@ -4206,10 +4277,12 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           if (didVirtualCssChange) {
             invalidateVirtualModules();
           }
-          return {
-            code: nextCode,
-            map: null,
-          };
+          return transformedModule(nextCode);
+        }
+
+        if (isInkModule) {
+          clearManagedModuleState(normalizedId);
+          return transformedModule(nextCode);
         }
 
         if (!isSvelte && !isAstro) {
@@ -4230,10 +4303,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             isAstro,
           });
         }
-        return {
-          code: nextCode,
-          map: null,
-        };
+        return transformedModule(nextCode);
       }
 
       const replacements: Array<{ start: number; end: number; text: string }> =
@@ -4274,12 +4344,14 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           if (moduleId === normalizedId) {
             return currentStaticModuleCode;
           }
+          let moduleSource: string;
           try {
             staticDependencies.add(cleanId(moduleId));
-            return getNodeFs().readFileSync(moduleId, "utf8");
+            moduleSource = getNodeFs().readFileSync(moduleId, "utf8");
           } catch {
             return null;
           }
+          return compileStaticModuleSource(moduleSource, moduleId);
         },
         resolveImportFile: (moduleId, importSource) =>
           resolveImportToFile(moduleId, importSource, importResolverOptions),
@@ -5053,7 +5125,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         }
 
         if (replacements.length === 0) {
-          return null;
+          return isInkModule ? transformedModule(nextCode) : null;
         }
 
         replacements.sort((a, b) => b.start - a.start);
@@ -5167,13 +5239,10 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           invalidateVirtualModules(scopedVirtualImport ? [normalizedId] : []);
         }
 
-        return {
-          code: nextCode,
-          map: null,
-        };
+        return transformedModule(nextCode);
       };
 
-      const hasImportModule = /\.importModule\s*\(/.test(code);
+      const hasImportModule = /\.importModule\s*\(/.test(transformInputCode);
       if (hasImportModule) {
         return (async () => {
           const currentModuleInfo = getModuleInfo(normalizedId);

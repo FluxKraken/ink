@@ -17,6 +17,7 @@
   "publish": {
     "include": [
       "README.md",
+      "ink.d.ts",
       "mod.ts",
       "mod.d.ts",
       "react.ts",
@@ -29,6 +30,6 @@
   },
   "tasks": {
     "build": "rm -rf dist && deno cache --node-modules-dir=auto npm:@types/node@^22.10.2 && deno run --node-modules-dir=auto -A npm:typescript/bin/tsc -p tsconfig.json",
-    "test": "deno test --node-modules-dir=auto -A vite_test.ts"
+    "test": "deno test --node-modules-dir=auto -A vite_test.ts ink_syntax_test.ts"
   }
 }

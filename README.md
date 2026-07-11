@@ -146,6 +146,77 @@ export default defineConfig({
 
 Additional setup recipes live in [examples.md](./examples.md).
 
+## `.ink` style modules
+
+The Vite plugin compiles `.ink` files as style-object modules. Object entries
+are separated by newlines, selector keys and CSS values do not need quotes, and
+arrays keep their normal comma separators.
+
+```ink
+// src/styles/reset.ink
+export default {
+  *, *::before, *::after: {
+    boxSizing: border-box
+    margin: 0
+    padding: 0
+  }
+
+  body: {
+    fontFamily: [system-ui, sans-serif]
+  }
+
+  h1, h2, h3, h4, h5, h6: {
+    margin: revert
+    fontSize: revert
+    fontWeight: revert
+  }
+} as const
+```
+
+Import the resulting object and assign it where its meaning is explicit:
+
+```ts
+import ink from "@kraken/ink";
+import reset from "./styles/reset.ink";
+
+const styles = new ink();
+styles.global = reset;
+```
+
+Bare property values and top-level `const` initializers are CSS literals. A
+simple `=name` inside a CSS value interpolates that constant, so units remain
+natural to write:
+
+```ink
+const pageWidth = 70rem
+
+export default {
+  content: {
+    width: min(=pageWidth, 100%)
+    marginInline: auto
+  }
+} as const
+```
+
+Prefix the whole value with `=` when it is a JavaScript expression. Inside a
+larger CSS value, use `={expression}` for a complex expression. The same rule
+applies to constants, for example `const pageWidth = =tokens.pageWidth`:
+
+```ink
+import { palette } from "./tokens.ts"
+
+export default {
+  body: {
+    color: =palette.text
+    maxWidth: calc(={palette.contentWidth.replace("rem", "px")} - 2rem)
+  }
+} as const
+```
+
+The `.ink` compiler uses a lexer, syntax tree, and code generator so selectors
+containing commas, pseudo-elements, attribute selectors, and CSS functions are
+parsed structurally.
+
 ## Quick start
 
 This is the recommended shape for new code: build styles incrementally with
