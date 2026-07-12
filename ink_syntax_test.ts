@@ -42,6 +42,25 @@ async function executeDefaultExport(source: string): Promise<unknown> {
   }
 }
 
+async function executeTypedModule(
+  source: string,
+): Promise<Record<string, unknown>> {
+  const compiled = compileInkModule(source, "/app/src/styles.ink");
+  const javascript = TypeScript.transpileModule(compiled.code, {
+    compilerOptions: {
+      module: TypeScript.ModuleKind.ESNext,
+      target: TypeScript.ScriptTarget.ES2022,
+    },
+  }).outputText;
+  const modulePath = Deno.makeTempFileSync({ suffix: ".mjs" });
+  try {
+    Deno.writeTextFileSync(modulePath, javascript);
+    return await import(`${toFileUrl(modulePath).href}?${crypto.randomUUID()}`);
+  } finally {
+    Deno.removeSync(modulePath);
+  }
+}
+
 Deno.test(".ink compiler builds an AST for newline-separated selector blocks", () => {
   const source = `export default {
   *, *::before, *::after: {
@@ -64,6 +83,7 @@ Deno.test(".ink compiler builds an AST for newline-separated selector blocks", (
   const compiled = compileInkModule(source, "/app/src/reset.ink");
   assertEquals(compiled.map, null);
   assertEquals(compiled.ast.kind, "module");
+  assert(compiled.ast.defaultExport !== null);
   assertEquals(compiled.ast.defaultExport.entries.length, 3);
   assertEquals(
     compiled.ast.defaultExport.entries[0].key.value,
@@ -149,7 +169,7 @@ export default {
   assert(pageWidth !== undefined);
   assertEquals(parseStaticExpression(pageWidth.initializer), "70rem");
 
-  const page = compiled.ast.defaultExport.entries[0]?.value;
+  const page = compiled.ast.defaultExport?.entries[0]?.value;
   assert(page?.kind === "object");
   const width = page.entries.find((entry) => entry.key.value === "width");
   assert(width !== undefined);
@@ -217,7 +237,7 @@ export default {
 `;
 
   const compiled = compileInkModule(source, "/app/src/page.ink");
-  const page = compiled.ast.defaultExport.entries[0]?.value;
+  const page = compiled.ast.defaultExport?.entries[0]?.value;
   assert(page?.kind === "object");
   const width = page.entries.find((entry) => entry.key.value === "width");
   assert(width !== undefined);
@@ -268,6 +288,79 @@ export default {
   });
 });
 
+Deno.test(".ink functions support typed parameters and CSS return values", async () => {
+  const source = `interface Gradient {
+  direction: string
+  from: string
+  to: string
+}
+
+function linearGradient({ direction, from, to }: Gradient) {
+  return linear-gradient(=direction, =from, =to)
+}
+
+export const gradientText = (gradient: string) => {
+  return {
+    background: =gradient
+    backgroundClip: text
+    color: transparent
+  }
+}
+
+export default {
+  =gradientText
+} as const
+`;
+
+  const compiled = compileInkModule(source, "/app/src/gradients.ink");
+  assertStringIncludes(compiled.code, "interface Gradient");
+  assertStringIncludes(
+    compiled.code,
+    "return `linear-gradient(${direction}, ${from}, ${to})`",
+  );
+  assertStringIncludes(compiled.code, "export const gradientText");
+  assertStringIncludes(compiled.code, 'backgroundClip: "text"');
+  assertStringIncludes(compiled.code, "export default {\n  gradientText,");
+  assertEquals(compiled.ast.defaultExport?.entries[0]?.shorthand, true);
+
+  const module = await executeTypedModule(source) as {
+    gradientText: (gradient: string) => Record<string, string>;
+    default: {
+      gradientText: (gradient: string) => Record<string, string>;
+    };
+  };
+  const gradient = "linear-gradient(90deg, red, blue)";
+  assertEquals(module.gradientText(gradient), {
+    background: gradient,
+    backgroundClip: "text",
+    color: "transparent",
+  });
+  assertEquals(module.default.gradientText, module.gradientText);
+});
+
+Deno.test(".ink modules preserve named export lists", async () => {
+  const source = `const card = (color: string) => {
+  return {
+    color: =color
+    display: block
+  }
+}
+
+export { card }
+`;
+
+  const compiled = compileInkModule(source, "/app/src/card.ink");
+  assertStringIncludes(compiled.code, "export { card }");
+  assertEquals(compiled.ast.defaultExport, null);
+  const module = await executeTypedModule(source) as {
+    card: (color: string) => Record<string, string>;
+  };
+  assertEquals(module.card("rebeccapurple"), {
+    color: "rebeccapurple",
+    display: "block",
+  });
+});
+
 Deno.test(".ink compiler preserves Theme constructors and explicit references", async () => {
   const source = `class Theme {
   constructor(tokens) { this.tokens = tokens }
@@ -296,7 +389,7 @@ export default {
   assert(themeDeclaration?.kind === "const-declaration");
   assertEquals(themeDeclaration.value.kind, "new-expression");
 
-  const exportedTheme = compiled.ast.defaultExport.entries[0]?.value;
+  const exportedTheme = compiled.ast.defaultExport?.entries[0]?.value;
   assertEquals(exportedTheme?.kind, "expression");
   assertStringIncludes(compiled.code, "const fluxLight = new Theme({");
   assertStringIncludes(compiled.code, "light: fluxLight");
@@ -326,7 +419,7 @@ export default {
 `;
 
   const compiled = compileInkModule(source, "/app/src/page.ink");
-  const page = compiled.ast.defaultExport.entries[0]?.value;
+  const page = compiled.ast.defaultExport?.entries[0]?.value;
   assert(page?.kind === "object");
   const entries = new Map(
     page.entries.map((entry) => [entry.key.value, entry.value]),
@@ -358,7 +451,7 @@ Deno.test(".ink compiler leaves URL and query equals signs literal", async () =>
 `;
 
   const compiled = compileInkModule(source, "/app/src/hero.ink");
-  const hero = compiled.ast.defaultExport.entries[0]?.value;
+  const hero = compiled.ast.defaultExport?.entries[0]?.value;
   assert(hero?.kind === "object");
   for (const entry of hero.entries) {
     assertEquals((entry.value as { kind: string }).kind, "css-literal");

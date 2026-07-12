@@ -15,6 +15,7 @@ export type InkObjectEntryNode = {
   kind: "entry";
   key: InkKeyNode;
   value: InkValueNode;
+  shorthand: boolean;
   span: InkSourceSpan;
 };
 
@@ -127,7 +128,7 @@ export type InkModuleNode = {
   kind: "module";
   prefix: string;
   preamble: InkModulePreambleNode[];
-  defaultExport: InkObjectNode;
+  defaultExport: InkObjectNode | null;
   suffix: string;
   span: InkSourceSpan;
 };
@@ -171,7 +172,7 @@ type SeparatorResult = {
   sawNewline: boolean;
 };
 
-type ValueContext = "object" | "array" | "module";
+type ValueContext = "object" | "array" | "module" | "return";
 
 function sourceLocationAt(
   source: string,
@@ -325,7 +326,7 @@ function skipTriviaAt(
 function findDefaultExport(
   source: string,
   id: string,
-): ModuleExportLocation {
+): ModuleExportLocation | null {
   let cursor = 0;
   let braceDepth = 0;
   let bracketDepth = 0;
@@ -408,12 +409,7 @@ function findDefaultExport(
     cursor += 1;
   }
 
-  throw new InkSyntaxError(
-    "Expected one default-exported style object",
-    source,
-    id,
-    0,
-  );
+  return null;
 }
 
 function parseEscapedString(
@@ -812,6 +808,10 @@ class InkParser {
     return this.parseValue("module");
   }
 
+  parseReturnValue(): InkValueNode {
+    return this.parseValue("return");
+  }
+
   parseObject(): InkObjectNode {
     const start = this.index;
     this.expect("{", "Expected '{' to open a style object");
@@ -842,6 +842,9 @@ class InkParser {
 
   private parseEntry(): InkObjectEntryNode {
     const start = this.index;
+    if (this.source[start] === "=") {
+      return this.parseShorthandEntry();
+    }
     const colon = this.findEntryColon();
     let keyStart = start;
     while (
@@ -895,7 +898,62 @@ class InkParser {
       kind: "entry",
       key,
       value,
+      shorthand: false,
       span: { start, end: value.span.end },
+    };
+  }
+
+  private parseShorthandEntry(): InkObjectEntryNode {
+    const start = this.index;
+    this.index += 1;
+    this.index = skipInlineTriviaAt(
+      this.source,
+      this.index,
+      this.source.length,
+      this.id,
+    );
+    if (!isIdentifierStart(this.source[this.index])) {
+      throw this.error(
+        "Expected an identifier after shorthand '='",
+        this.index,
+      );
+    }
+
+    const name = readIdentifier(this.source, this.index);
+    const end = skipInlineTriviaAt(
+      this.source,
+      name.end,
+      this.source.length,
+      this.id,
+    );
+    const next = this.source[end];
+    if (
+      next !== "," && next !== "}" && !isNewline(next) &&
+      !(next === "/" &&
+        (this.source[end + 1] === "/" || this.source[end + 1] === "*"))
+    ) {
+      throw this.error(
+        "Shorthand entries must contain exactly one identifier",
+        end,
+      );
+    }
+    this.index = end;
+
+    return {
+      kind: "entry",
+      key: {
+        kind: "key",
+        value: name.value,
+        quoted: false,
+        span: { start: name.end - name.value.length, end: name.end },
+      },
+      value: {
+        kind: "expression",
+        source: name.value,
+        span: { start, end: name.end },
+      },
+      shorthand: true,
+      span: { start, end: name.end },
     };
   }
 
@@ -1201,7 +1259,7 @@ class InkParser {
         return cursor;
       }
       if (
-        context === "module" &&
+        (context === "module" || context === "return") &&
         char === ";" &&
         parenDepth === 0 &&
         bracketDepth === 0 &&
@@ -1210,7 +1268,17 @@ class InkParser {
         return cursor;
       }
       if (
-        (context === "object" || context === "module") &&
+        context === "return" &&
+        char === "}" &&
+        parenDepth === 0 &&
+        bracketDepth === 0 &&
+        braceDepth === 0
+      ) {
+        return cursor;
+      }
+      if (
+        (context === "object" || context === "module" ||
+          context === "return") &&
         isNewline(char) &&
         parenDepth === 0 &&
         bracketDepth === 0 &&
@@ -1561,12 +1629,190 @@ function emitObject(object: InkObjectNode, indentation: number): string {
   if (object.entries.length === 0) return "{}";
   const currentIndent = " ".repeat(indentation);
   const childIndent = " ".repeat(indentation + 2);
-  const entries = object.entries.map((entry) =>
-    `${childIndent}${emitKey(entry.key)}: ${
+  const entries = object.entries.map((entry) => {
+    if (entry.shorthand) {
+      return `${childIndent}${emitKey(entry.key)},`;
+    }
+    return `${childIndent}${emitKey(entry.key)}: ${
       emitValue(entry.value, indentation + 2)
-    },`
-  );
+    },`;
+  });
   return `{\n${entries.join("\n")}\n${currentIndent}}`;
+}
+
+type InkFunctionBodyRange = {
+  start: number;
+  end: number;
+};
+
+function findInkFunctionBodies(
+  source: string,
+  id: string,
+): InkFunctionBodyRange[] {
+  const bodies: InkFunctionBodyRange[] = [];
+  let cursor = 0;
+
+  while (cursor < source.length) {
+    const char = source[cursor];
+    if (char === '"' || char === "'" || char === "`") {
+      cursor = skipQuotedSource(source, cursor, id);
+      continue;
+    }
+    if (char === "/" && source[cursor + 1] === "/") {
+      cursor = skipLineComment(source, cursor);
+      continue;
+    }
+    if (char === "/" && source[cursor + 1] === "*") {
+      cursor = skipBlockComment(source, cursor, id);
+      continue;
+    }
+
+    if (isIdentifierStart(char)) {
+      const token = readIdentifier(source, cursor);
+      if (token.value === "function") {
+        let openParameters = token.end;
+        while (openParameters < source.length) {
+          const parameterChar = source[openParameters];
+          if (parameterChar === '"' || parameterChar === "'") {
+            openParameters = skipQuotedSource(source, openParameters, id);
+            continue;
+          }
+          if (parameterChar === "(") break;
+          openParameters += 1;
+        }
+        if (source[openParameters] === "(") {
+          const closeParameters = findMatchingDelimiter(
+            source,
+            openParameters,
+            "(",
+            ")",
+            source.length,
+            id,
+          );
+          let bodyStart = skipTriviaAt(source, closeParameters + 1, id);
+          while (bodyStart < source.length && source[bodyStart] !== "{") {
+            if (
+              source[bodyStart] === '"' || source[bodyStart] === "'" ||
+              source[bodyStart] === "`"
+            ) {
+              bodyStart = skipQuotedSource(source, bodyStart, id);
+              continue;
+            }
+            bodyStart += 1;
+          }
+          if (source[bodyStart] === "{") {
+            let bodyEnd = findMatchingDelimiter(
+              source,
+              bodyStart,
+              "{",
+              "}",
+              source.length,
+              id,
+            );
+            const possibleBodyStart = skipTriviaAt(source, bodyEnd + 1, id);
+            if (source[possibleBodyStart] === "{") {
+              bodyStart = possibleBodyStart;
+              bodyEnd = findMatchingDelimiter(
+                source,
+                bodyStart,
+                "{",
+                "}",
+                source.length,
+                id,
+              );
+            }
+            bodies.push({ start: bodyStart + 1, end: bodyEnd });
+            cursor = bodyEnd + 1;
+            continue;
+          }
+        }
+      }
+      cursor = token.end;
+      continue;
+    }
+
+    if (char === "=" && source[cursor + 1] === ">") {
+      const bodyStart = skipTriviaAt(source, cursor + 2, id);
+      if (source[bodyStart] === "{") {
+        const bodyEnd = findMatchingDelimiter(
+          source,
+          bodyStart,
+          "{",
+          "}",
+          source.length,
+          id,
+        );
+        bodies.push({ start: bodyStart + 1, end: bodyEnd });
+        cursor = bodyEnd + 1;
+        continue;
+      }
+    }
+    cursor += 1;
+  }
+
+  return bodies;
+}
+
+function transformInkFunctionReturns(source: string, id: string): string {
+  const replacements: Array<{ start: number; end: number; value: string }> = [];
+
+  for (const body of findInkFunctionBodies(source, id)) {
+    let cursor = body.start;
+    while (cursor < body.end) {
+      const char = source[cursor];
+      if (char === '"' || char === "'" || char === "`") {
+        cursor = skipQuotedSource(source, cursor, id);
+        continue;
+      }
+      if (char === "/" && source[cursor + 1] === "/") {
+        cursor = skipLineComment(source, cursor);
+        continue;
+      }
+      if (char === "/" && source[cursor + 1] === "*") {
+        cursor = skipBlockComment(source, cursor, id);
+        continue;
+      }
+      if (!isIdentifierStart(char)) {
+        cursor += 1;
+        continue;
+      }
+
+      const token = readIdentifier(source, cursor);
+      if (token.value !== "return") {
+        cursor = token.end;
+        continue;
+      }
+      const valueStart = skipInlineTriviaAt(
+        source,
+        token.end,
+        body.end,
+        id,
+      );
+      if (
+        valueStart >= body.end || isNewline(source[valueStart]) ||
+        source[valueStart] === ":"
+      ) {
+        cursor = token.end;
+        continue;
+      }
+
+      const parser = new InkParser(source, id, valueStart);
+      const value = parser.parseReturnValue();
+      replacements.push({
+        start: valueStart,
+        end: parser.position,
+        value: emitValue(value, 0),
+      });
+      cursor = parser.position;
+    }
+  }
+
+  let output = source;
+  for (const replacement of replacements.reverse()) {
+    output = output.slice(0, replacement.start) + replacement.value +
+      output.slice(replacement.end);
+  }
+  return output;
 }
 
 function emitModulePreamble(nodes: readonly InkModulePreambleNode[]): string {
@@ -1603,14 +1849,16 @@ function consumeDefaultExportSuffix(
 
 function emitModule(module: InkModuleNode): string {
   let code = emitModulePreamble(module.preamble);
-  if (code.length > 0 && !isNewline(code[code.length - 1])) {
-    code += "\n";
+  if (module.defaultExport) {
+    if (code.length > 0 && !isNewline(code[code.length - 1])) {
+      code += "\n";
+    }
+    code += `export default ${emitObject(module.defaultExport, 0)};`;
   }
-  code += `export default ${emitObject(module.defaultExport, 0)};`;
   if (module.suffix.length > 0) {
-    if (!isNewline(module.suffix[0])) code += "\n";
+    if (code.length > 0 && !isNewline(module.suffix[0])) code += "\n";
     code += module.suffix;
-  } else {
+  } else if (code.length === 0 || !isNewline(code[code.length - 1])) {
     code += "\n";
   }
   return code;
@@ -1621,25 +1869,50 @@ function emitModule(module: InkModuleNode): string {
  *
  * The source is parsed into a dedicated syntax tree. Newlines separate object
  * entries, arrays remain comma-delimited, raw values become CSS strings,
- * top-level constants accept CSS values, and `=expression` preserves or
- * interpolates an explicit JavaScript expression.
+ * top-level constants and function returns accept CSS values, and
+ * `=expression` preserves or interpolates an explicit JavaScript expression.
+ * TypeScript declarations and named exports remain ordinary module syntax.
  */
 export function compileInkModule(
   source: string,
   id = "<ink-module>",
 ): CompileInkModuleResult {
-  const location = findDefaultExport(source, id);
-  const preamble = parseModulePreamble(source, location.exportStart, id);
-  const parser = new InkParser(source, id, location.objectStart);
+  const transformedSource = transformInkFunctionReturns(source, id);
+  const location = findDefaultExport(transformedSource, id);
+  if (!location) {
+    const ast: InkModuleNode = {
+      kind: "module",
+      prefix: transformedSource,
+      preamble: parseModulePreamble(
+        transformedSource,
+        transformedSource.length,
+        id,
+      ),
+      defaultExport: null,
+      suffix: "",
+      span: { start: 0, end: transformedSource.length },
+    };
+    return { code: emitModule(ast), ast, map: null };
+  }
+  const preamble = parseModulePreamble(
+    transformedSource,
+    location.exportStart,
+    id,
+  );
+  const parser = new InkParser(transformedSource, id, location.objectStart);
   const defaultExport = parser.parseObject();
-  const suffixStart = consumeDefaultExportSuffix(source, parser.position, id);
+  const suffixStart = consumeDefaultExportSuffix(
+    transformedSource,
+    parser.position,
+    id,
+  );
   const ast: InkModuleNode = {
     kind: "module",
-    prefix: source.slice(0, location.exportStart),
+    prefix: transformedSource.slice(0, location.exportStart),
     preamble,
     defaultExport,
-    suffix: source.slice(suffixStart),
-    span: { start: 0, end: source.length },
+    suffix: transformedSource.slice(suffixStart),
+    span: { start: 0, end: transformedSource.length },
   };
   return {
     code: emitModule(ast),

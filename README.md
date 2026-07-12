@@ -250,6 +250,42 @@ export default {
 } as const
 ```
 
+Interfaces and TypeScript parameter annotations can be used in `.ink` modules.
+Function return values follow the same value rules as objects: bare values are
+CSS, while JavaScript expressions use `=`. Block-bodied arrow functions work
+the same way:
+
+```ink
+interface Gradient {
+  direction: string
+  from: string
+  to: string
+}
+
+function linearGradient({ direction, from, to }: Gradient) {
+  return linear-gradient(=direction, =from, =to)
+}
+
+export const gradientText = (gradient: string) => {
+  return {
+    background: =gradient
+    backgroundClip: text
+    color: transparent
+  }
+}
+```
+
+Modules can use named declarations or export lists, with or without a default
+export. In a relaxed object, `=name` is shorthand for `name: =name`:
+
+```ink
+export { linearGradient }
+
+export default {
+  =gradientText
+} as const
+```
+
 The `.ink` compiler uses a lexer, syntax tree, and code generator so selectors
 containing commas, pseudo-elements, attribute selectors, and CSS functions are
 parsed structurally.

@@ -5219,13 +5219,13 @@ export default {
     const css = load(VIRTUAL_ID) as string;
     assert(
       css.includes(
-        '@scope ([data-ink-theme="light"]){:scope{--site-bg:linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%));--site-fg:black}}',
+        '@scope ([data-ink-theme="light"]){:scope{--site-bg:linear-gradient( 147deg, hsl(200 100% 50%), hsl(60 80% 80%) );--site-fg:black}}',
       ),
       css,
     );
     assert(
       css.includes(
-        '@scope ([data-ink-theme="dark"]){:scope{--site-bg:linear-gradient(147deg, hsl(200 100% 50%), hsl(60 80% 80%));--site-fg:white}}',
+        '@scope ([data-ink-theme="dark"]){:scope{--site-bg:linear-gradient( 147deg, hsl(200 100% 50%), hsl(60 80% 80%) );--site-fg:white}}',
       ),
       css,
     );
@@ -6176,6 +6176,71 @@ export default {
         lineHeight: 1.1,
       },
     });
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("resolves typed named functions from .ink modules", () => {
+  const plugin = inkVite();
+  const transform = asHook(plugin.transform);
+  const load = asHook(plugin.load);
+  const configResolved = asHook(plugin.configResolved);
+  const root = Deno.makeTempDirSync();
+
+  try {
+    const libDir = `${root}/src/lib`;
+    const helpersId = `${libDir}/gradients.ink`;
+    const appId = `${libDir}/app.ts`;
+    Deno.mkdirSync(libDir, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" } as const;\n`,
+    );
+    Deno.writeTextFileSync(
+      helpersId,
+      `interface Gradient {
+  direction: string
+  from: string
+  to: string
+}
+
+function linearGradient({ direction, from, to }: Gradient) {
+  return linear-gradient(=direction, =from, =to)
+}
+
+const gradientText = (gradient: string) => {
+  return {
+    background: =gradient
+    backgroundClip: text
+    color: transparent
+  }
+}
+
+export { gradientText, linearGradient }
+`,
+    );
+
+    configResolved({ root, resolve: { alias: [] } });
+    const moduleCode = `import ink from "@kraken/ink";\n` +
+      `import { gradientText, linearGradient } from "./gradients.ink";\n` +
+      `const styles = new ink();\n` +
+      `styles.base = { hero: gradientText(linearGradient({ direction: "90deg", from: "red", to: "blue" })) };\n`;
+    const watched: string[] = [];
+    const transformed = transform.call(
+      { addWatchFile: (id: string) => watched.push(id) },
+      moduleCode,
+      appId,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+    assert(watched.includes(helpersId));
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(
+      css,
+      /\.ink_[a-z0-9]+\{background:linear-gradient\(90deg, red, blue\);background-clip:text;color:transparent\}/,
+    );
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
