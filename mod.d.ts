@@ -18,6 +18,7 @@ import {
   LayeredApplyInput,
   PrimitiveStyleValue,
   SetInput,
+  StoreThemesInput,
   StyleDeclaration,
   StyleSheet,
   StyleValue,
@@ -265,6 +266,8 @@ export type { ThemeMode };
 export type { ThemeStore, ThemeStoreUnsubscribe };
 /** Re-exported imported theme map type. */
 export type { ImportedThemesInput };
+/** Store theme map with a required `default` root theme. */
+export type { StoreThemesInput };
 /** Project-wide config shape accepted by `ink.config.ts`. */
 export type { InkConfigFile };
 /** Style resolution mode used by the Vite plugin. */

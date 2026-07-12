@@ -131,6 +131,8 @@ export type { ThemeMode } from "./shared.js";
 export type { ThemeStore, ThemeStoreUnsubscribe } from "./shared.js";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./shared.js";
+/** Theme map accepted by `themeMode: "store"`, including `default`. */
+export type { StoreThemesInput } from "./shared.js";
 /** Project-wide config shape accepted by `ink.config.ts`. */
 export type { InkConfigFile } from "./shared.js";
 /** Style resolution mode used by the Vite plugin. */

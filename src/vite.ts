@@ -570,6 +570,12 @@ if (!__inkCleanup && __inkThemeStore && typeof __inkThemeStore === "object" && "
 
 const __inkRuntimeKey = ${JSON.stringify(runtimeKey)};
 const __inkThemeStore = __inkConfig?.themeStore;
+const __inkThemes = __inkConfig?.themes;
+const __inkThemeNames = new Set(
+  __inkThemes && typeof __inkThemes === "object"
+    ? Object.keys(__inkThemes).map((name) => name.trim())
+    : ["default"],
+);
 
 function __inkReadTheme(store) {
   if (!store) return undefined;
@@ -585,11 +591,17 @@ function __inkReadTheme(store) {
 function __inkApplyTheme(value) {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
-  if (value === undefined || value === null || value === "") {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  const themeName = candidate !== "" && __inkThemeNames.has(candidate)
+    ? candidate
+    : "default";
+  if (
+    themeName === "default" || themeName === "root" || themeName === ":root"
+  ) {
     root.removeAttribute("data-ink-theme");
     return;
   }
-  root.setAttribute("data-ink-theme", String(value));
+  root.setAttribute("data-ink-theme", themeName);
 }
 
 function __inkDispose(cleanup) {
@@ -1514,6 +1526,25 @@ function normalizeThemeMode(value: unknown): ThemeMode {
       value === "custom" || value === "store"
     ? value
     : "color-scheme";
+}
+
+function assertStoreThemeConfig(
+  config: Record<string, unknown>,
+  themeMode: ThemeMode,
+): void {
+  if (themeMode !== "store") {
+    return;
+  }
+
+  if (
+    !isRecord(config.themes) ||
+    !Object.prototype.hasOwnProperty.call(config.themes, "default") ||
+    !isRecord(config.themes.default)
+  ) {
+    throw new Error(
+      'themeMode "store" requires themes.default so fallback tokens can be emitted to :root.',
+    );
+  }
 }
 
 function normalizeDebugOptions(
@@ -2493,6 +2524,7 @@ function loadInkConfig(
   );
   const resolution = normalizeResolution(configObject.resolution);
   const themeMode = normalizeThemeMode(configObject.themeMode);
+  assertStoreThemeConfig(configObject, themeMode);
   const hasThemeStore = Object.prototype.hasOwnProperty.call(
     configObject,
     "themeStore",

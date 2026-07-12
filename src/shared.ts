@@ -188,6 +188,10 @@ export type ThemeStore<T extends string = string> =
 export type ThemeInput = Theme | ThemeAdvanced | ThemeTokenInput;
 /** Map of imported theme names/selectors to theme definitions. */
 export type ImportedThemesInput = Record<string, ThemeInput>;
+/** Theme map required by `themeMode: "store"`, including its root fallback. */
+export type StoreThemesInput = ImportedThemesInput & {
+  default: ThemeInput;
+};
 /** Fontsource package entry accepted by `fonts`. */
 export interface FontSourceInput {
   /** CSS font-family name, for example `"Bungee"`. */
@@ -310,8 +314,7 @@ export interface InkConfigContainer {
   rule: string;
 }
 
-/** Project-wide Ink config loaded from `ink.config.ts`. */
-export interface InkConfigFile {
+interface InkConfigFileBase {
   /** Additional directories whose modules should be transformed by the Vite plugin. */
   include?: string | readonly string[];
   /** App root layout module that should import the shared Ink stylesheet. */
@@ -324,10 +327,6 @@ export interface InkConfigFile {
   layers?: readonly string[];
   /** Default unit appended to numeric style values. */
   defaultUnit?: string;
-  /** Theme expansion strategy used for project-wide themes. */
-  themeMode?: ThemeMode;
-  /** Store-like value whose current value names the active theme when `themeMode` is `"store"`. */
-  themeStore?: ThemeStore;
   /** Static extraction strategy used by the Vite plugin. */
   resolution?: InkResolution;
   /** Static/dynamic transform debug logging. */
@@ -342,11 +341,31 @@ export interface InkConfigFile {
   )[];
   /** Named utility declarations available to `@apply`. */
   utilities?: StyleSheet;
-  /** Project-wide themes emitted into the shared stylesheet. */
-  themes?: ImportedThemesInput;
   /** Project-wide Fontsource fonts emitted as imports and `--font-*` variables. */
   fonts?: readonly FontSourceInput[];
 }
+
+/** Project-wide Ink config loaded from `ink.config.ts`. */
+export type InkConfigFile =
+  & InkConfigFileBase
+  & (
+    | {
+      /** Store-backed themes require a `default` root theme. */
+      themeMode: "store";
+      /** Store-like value whose current value names the active theme. */
+      themeStore?: ThemeStore;
+      /** Project-wide themes, including the required `default` root theme. */
+      themes: StoreThemesInput;
+    }
+    | {
+      /** Theme expansion strategy used for project-wide themes. */
+      themeMode?: Exclude<ThemeMode, "store">;
+      /** Store-like value used only when `themeMode` is `"store"`. */
+      themeStore?: ThemeStore;
+      /** Project-wide themes emitted into the shared stylesheet. */
+      themes?: ImportedThemesInput;
+    }
+  );
 
 /** Type a project-wide Ink config without changing its runtime value. */
 export function defineInkConfig<const T extends InkConfigFile>(config: T): T {
@@ -678,6 +697,15 @@ export function themesToConfig(
 
   if (!themes) {
     return { root, global };
+  }
+
+  if (
+    themeMode === "store" &&
+    !Object.prototype.hasOwnProperty.call(themes, "default")
+  ) {
+    throw new Error(
+      'themeMode "store" requires themes.default so fallback tokens can be emitted to :root.',
+    );
   }
 
   for (const [scope, theme] of Object.entries(themes)) {

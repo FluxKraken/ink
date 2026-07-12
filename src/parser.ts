@@ -1650,6 +1650,13 @@ function normalizeImportedThemes(
     return null;
   }
 
+  if (
+    options.themeMode === "store" &&
+    !Object.prototype.hasOwnProperty.call(value, "default")
+  ) {
+    return null;
+  }
+
   const root: RootVarEntry[] = [];
   const global: StyleSheet = {};
 

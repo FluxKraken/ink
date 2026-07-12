@@ -80,6 +80,8 @@ export type { ThemeMode } from "./src/index.ts";
 export type { ThemeStore, ThemeStoreUnsubscribe } from "./src/index.ts";
 /** Theme map accepted by `themes`. */
 export type { ImportedThemesInput } from "./src/index.ts";
+/** Theme map accepted by `themeMode: "store"`, including `default`. */
+export type { StoreThemesInput } from "./src/index.ts";
 /** Project-wide config shape accepted by `ink.config.ts`. */
 export type { InkConfigFile } from "./src/index.ts";
 /** Style resolution mode used by the Vite plugin. */

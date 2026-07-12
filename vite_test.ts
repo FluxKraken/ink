@@ -29,6 +29,7 @@ import {
   tailwindConfigToCss,
   Theme,
   ThemeAdvanced,
+  themesToConfig,
   toCssDeclaration,
   toCssGlobalRules,
   toCssRules,
@@ -762,13 +763,13 @@ Deno.test("injects Svelte theme-store runtime in configured Svelte root layout",
       `${root}/ink.config.ts`,
       `import { defineInkConfig } from "@kraken/ink";\n` +
         `import { PersistedState } from "runed";\n` +
-        `const themeMode = new PersistedState("themeMode", "light");\n` +
+        `const themeMode = new PersistedState("themeMode", "default");\n` +
         `export default defineInkConfig({\n` +
         `  rootLayout: "./src/routes/+layout.svelte",\n` +
         `  themeMode: "store",\n` +
         `  themeStore: themeMode,\n` +
         `  themes: {\n` +
-        `    light: { headerBG: "black" },\n` +
+        `    default: { headerBG: "black", headerFG: "white" },\n` +
         `    dark: { headerBG: "white" },\n` +
         `  },\n` +
         `});\n`,
@@ -796,7 +797,7 @@ Deno.test("injects Svelte theme-store runtime in configured Svelte root layout",
     const css = load(VIRTUAL_ID) as string;
     assert(
       css.includes(
-        '@scope ([data-ink-theme="light"]){:scope{--header-bg:black}}',
+        ":root{--header-bg:black;--header-fg:white}",
       ),
     );
     assert(
@@ -804,6 +805,8 @@ Deno.test("injects Svelte theme-store runtime in configured Svelte root layout",
         '@scope ([data-ink-theme="dark"]){:scope{--header-bg:white}}',
       ),
     );
+    assert(!css.includes('[data-ink-theme="default"]'));
+    assert(!css.includes('[data-ink-theme="light"]'));
 
     const runtime = load(SVELTE_THEME_STORE_RUNTIME_VIRTUAL_ID) as string;
     assert(runtime.includes('import __inkConfig from "/ink.config.ts";'));
@@ -846,7 +849,7 @@ Deno.test("injects virtual stylesheet import in configured TSX root layout", () 
   }
 });
 
-Deno.test("injects generic theme-store runtime in configured TSX root layout", () => {
+Deno.test("injects generic theme-store runtime in configured TSX root layout", async () => {
   const root = Deno.makeTempDirSync();
 
   try {
@@ -854,7 +857,7 @@ Deno.test("injects generic theme-store runtime in configured TSX root layout", (
     Deno.writeTextFileSync(
       `${root}/ink.config.ts`,
       `const themeMode = {\n` +
-        `  state: "light",\n` +
+        `  state: "default",\n` +
         `  subscribe(listener: (value: string) => void) {\n` +
         `    listener(this.state);\n` +
         `    return { unsubscribe() {} };\n` +
@@ -865,8 +868,8 @@ Deno.test("injects generic theme-store runtime in configured TSX root layout", (
         `  themeMode: "store",\n` +
         `  themeStore: themeMode,\n` +
         `  themes: {\n` +
-        `    light: { headerBG: "black" },\n` +
-        `    dark: { headerBG: "white" },\n` +
+        `    default: { headerBG: "black" },\n` +
+        `    sepia: { headerBG: "tan" },\n` +
         `  },\n` +
         `};\n`,
     );
@@ -896,6 +899,102 @@ Deno.test("injects generic theme-store runtime in configured TSX root layout", (
     assert(runtime.includes("getState"));
     assert(runtime.includes("data-ink-theme"));
     assert(!runtime.includes("$effect.root"));
+
+    const globals = globalThis as Record<string, any>;
+    const originalDocument = globals.document;
+    const originalConfig = globals.__ink_test_theme_config__;
+    const originalCleanup = globals.__ink_theme_store_cleanup__;
+    let activeThemeAttribute: string | null = "light";
+    let listener: ((value?: string) => void) | undefined;
+
+    globals.document = {
+      documentElement: {
+        setAttribute(name: string, value: string) {
+          if (name === "data-ink-theme") {
+            activeThemeAttribute = value;
+          }
+        },
+        removeAttribute(name: string) {
+          if (name === "data-ink-theme") {
+            activeThemeAttribute = null;
+          }
+        },
+      },
+    };
+    globals.__ink_test_theme_config__ = {
+      themes: { default: {}, sepia: {} },
+      themeStore: {
+        state: "light",
+        subscribe(run: (value?: string) => void) {
+          listener = run;
+          return () => {};
+        },
+      },
+    };
+    delete globals.__ink_theme_store_cleanup__;
+
+    try {
+      const executableRuntime = runtime.replace(
+        'import __inkConfig from "/ink.config.ts";',
+        "const __inkConfig = globalThis.__ink_test_theme_config__;",
+      );
+      await import(
+        `data:text/javascript;charset=utf-8,${
+          encodeURIComponent(executableRuntime)
+        }`
+      );
+
+      assertEquals(activeThemeAttribute, null);
+      listener?.("sepia");
+      assertEquals(activeThemeAttribute, "sepia");
+      listener?.("default");
+      assertEquals(activeThemeAttribute, null);
+      listener?.("light");
+      assertEquals(activeThemeAttribute, null);
+    } finally {
+      globals.__ink_theme_store_cleanup__?.();
+      if (originalCleanup === undefined) {
+        delete globals.__ink_theme_store_cleanup__;
+      } else {
+        globals.__ink_theme_store_cleanup__ = originalCleanup;
+      }
+      if (originalConfig === undefined) {
+        delete globals.__ink_test_theme_config__;
+      } else {
+        globals.__ink_test_theme_config__ = originalConfig;
+      }
+      if (originalDocument === undefined) {
+        delete globals.document;
+      } else {
+        globals.document = originalDocument;
+      }
+    }
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("rejects store theme config without a default theme", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default {\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore: { current: "sepia" },\n` +
+        `  themes: { sepia: { headerBG: "tan" } },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+
+    assertThrows(
+      () => configResolved({ root, resolve: { alias: [] } }),
+      Error,
+      'themeMode "store" requires themes.default',
+    );
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -2592,12 +2691,13 @@ Deno.test("published types accept store-backed theme config", () => {
   assertPackageTypesSucceed(`
     import {
       defineInkConfig,
+      type StoreThemesInput,
       type ThemeStore,
       type ThemeStoreUnsubscribe,
     } from "@kraken/ink";
 
     const reactStore = {
-      getSnapshot: () => "light",
+      getSnapshot: () => "default",
       subscribe(listener: () => void): ThemeStoreUnsubscribe {
         listener();
         return () => {};
@@ -2605,30 +2705,36 @@ Deno.test("published types accept store-backed theme config", () => {
     };
 
     const tanstackStore = {
-      state: "dark",
-      get: () => "dark",
+      state: "sepia",
+      get: () => "sepia",
       subscribe(listener: (value: string) => void) {
-        listener("dark");
+        listener("sepia");
         return { unsubscribe() {} };
       },
     } satisfies ThemeStore;
 
+    const themes = {
+      default: { surface: "#fff", text: "#111" },
+      sepia: { surface: "#704214" },
+    } satisfies StoreThemesInput;
+
     export const reactConfig = defineInkConfig({
       themeMode: "store",
       themeStore: reactStore,
-      themes: {
-        light: { surface: "#fff" },
-        dark: { surface: "#111" },
-      },
+      themes,
     });
 
     export const tanstackConfig = defineInkConfig({
       themeMode: "store",
       themeStore: tanstackStore,
-      themes: {
-        light: { surface: "#fff" },
-        dark: { surface: "#111" },
-      },
+      themes,
+    });
+
+    // @ts-expect-error store mode requires themes.default
+    defineInkConfig({
+      themeMode: "store",
+      themeStore: tanstackStore,
+      themes: { sepia: { surface: "#704214" } },
     });
   `);
 });
@@ -2812,11 +2918,17 @@ Deno.test("parser expands themes into store attribute scopes", () => {
   const parsed = parseInkCallArguments(
     `{
       themes: {
-        light: {
-          headerBG: "black"
+        default: {
+          site: {
+            bg: "blue",
+            fg: "white",
+            width: "72rem"
+          }
         },
-        dark: {
-          headerBG: "white"
+        midnight: {
+          site: {
+            bg: "black"
+          }
         }
       }
     }`,
@@ -2824,18 +2936,60 @@ Deno.test("parser expands themes into store attribute scopes", () => {
   );
 
   assert(parsed !== null);
-  const lightScope = parsed.global?.[
-    '@scope ([data-ink-theme="light"])'
+  const midnightScope = parsed.global?.[
+    '@scope ([data-ink-theme="midnight"])'
   ] as
     | Record<string, Record<string, unknown>>
     | undefined;
-  const darkScope = parsed.global?.[
-    '@scope ([data-ink-theme="dark"])'
-  ] as
-    | Record<string, Record<string, unknown>>
-    | undefined;
-  assertEquals(lightScope?.[":scope"]?.["--header-bg"], "black");
-  assertEquals(darkScope?.[":scope"]?.["--header-bg"], "white");
+  assertEquals(parsed.root, [{
+    "--site-bg": "blue",
+    "--site-fg": "white",
+    "--site-width": "72rem",
+  }]);
+  assertEquals(midnightScope?.[":scope"], { "--site-bg": "black" });
+  assertEquals(
+    parsed.global?.['@scope ([data-ink-theme="default"])'],
+    undefined,
+  );
+  assertEquals(
+    parsed.global?.['@scope ([data-ink-theme="light"])'],
+    undefined,
+  );
+});
+
+Deno.test("store themes emit and require a default root theme", () => {
+  const expanded = themesToConfig(
+    {
+      default: { site: { bg: "blue", fg: "white" } },
+      midnight: { site: { bg: "black" } },
+    },
+    "store",
+  );
+  assertEquals(expanded.root, [{
+    "--site-bg": "blue",
+    "--site-fg": "white",
+  }]);
+  assertEquals(
+    expanded.global['@scope ([data-ink-theme="midnight"])'],
+    { ":scope": { "--site-bg": "black" } },
+  );
+
+  assertEquals(
+    parseInkCallArguments(
+      `{ themes: { sepia: { site: { bg: "tan" } } } }`,
+      { themeMode: "store" },
+    ),
+    null,
+  );
+  assertThrows(
+    () =>
+      themesToConfig(
+        { sepia: { site: { bg: "tan" } } },
+        "store",
+      ),
+    Error,
+    'themeMode "store" requires themes.default',
+  );
 });
 
 Deno.test("parser flattens nested theme groups and resolves nested tVar references", () => {
@@ -5164,7 +5318,7 @@ const background = linear-gradient( _
   =fluxYellow _
 )
 
-const fluxLight = new Theme({
+const fluxDefault = new Theme({
   site: {
     bg: =background
     fg: black
@@ -5173,13 +5327,12 @@ const fluxLight = new Theme({
 
 const fluxDark = new Theme({
   site: {
-    bg: =background
-    fg: white
+    bg: black
   }
 })
 
 export default {
-  light: =fluxLight
+  default: =fluxDefault
   dark: =fluxDark
 } as const
 `,
@@ -5219,16 +5372,18 @@ export default {
     const css = load(VIRTUAL_ID) as string;
     assert(
       css.includes(
-        '@scope ([data-ink-theme="light"]){:scope{--site-bg:linear-gradient( 147deg, hsl(200 100% 50%), hsl(60 80% 80%) );--site-fg:black}}',
+        ":root{--site-bg:linear-gradient( 147deg, hsl(200 100% 50%), hsl(60 80% 80%) );--site-fg:black}",
       ),
       css,
     );
     assert(
       css.includes(
-        '@scope ([data-ink-theme="dark"]){:scope{--site-bg:linear-gradient( 147deg, hsl(200 100% 50%), hsl(60 80% 80%) );--site-fg:white}}',
+        '@scope ([data-ink-theme="dark"]){:scope{--site-bg:black}}',
       ),
       css,
     );
+    assert(!css.includes('[data-ink-theme="default"]'), css);
+    assert(!css.includes('[data-ink-theme="light"]'), css);
     assert(
       css.includes(
         "@layer general{body{background:var(--site-bg);color:var(--site-fg)}}",

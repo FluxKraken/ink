@@ -594,61 +594,81 @@ styles.themes = {
 };
 ```
 
-With `themeMode: "store"`, Ink emits each non-root theme under a
-`data-ink-theme` scope and imports a small runtime bridge that mirrors
-`themeStore` onto `document.documentElement`. This works with Svelte stores,
-React external-store style objects, TanStack stores, and Runed
+With `themeMode: "store"`, `themes` must contain a `default` theme. Ink emits
+that theme's tokens directly on `:root`, so a complete set of variables is
+available before the store bridge runs. Put every required token in `default`;
+this avoids a flash of unstyled content. Each additional theme can contain only
+the tokens it overrides and is emitted under its exact key, such as
+`@scope ([data-ink-theme="dark"])`.
+
+The small runtime bridge reflects `themeStore` onto `document.documentElement`.
+The `default` value removes `data-ink-theme`, while another defined key adds it
+verbatim. An unknown value, including a stale persisted value, falls back to the
+default theme and leaves the attribute off. There is no built-in `light` key.
+The bridge does not rewrite the store itself, so migrate or clear old persisted
+values if the app UI also needs the stored value normalized. This works with
+Svelte stores, React external-store style objects, TanStack stores, and Runed
 `PersistedState` in Svelte root layouts. Put the store in a browser-safe module
 and import that same singleton from both `ink.config.ts` and your app UI.
 
 ```ts
-// src/lib/theme.svelte.ts
+// src/lib/styles/theme.svelte.ts
 import { PersistedState } from "runed";
 
-export const themeState = new PersistedState("themeMode", "light");
+export const themeState = new PersistedState("themeMode", "default");
+```
+
+```ts
+// src/lib/styles/theme.ts
+import { Theme } from "@kraken/ink";
+import Settings from "./settings";
+
+const fluxDefault = new Theme({
+  site: {
+    bg: "blue",
+    fg: "white",
+    width: Settings.contentWidth,
+  },
+});
+
+const fluxDark = new Theme({
+  site: {
+    bg: "black",
+  },
+});
+
+export default {
+  default: fluxDefault,
+  dark: fluxDark,
+} as const;
 ```
 
 ```ts
 // ink.config.ts
-import { defineInkConfig, Theme } from "@kraken/ink";
-import { themeState } from "./src/lib/theme.svelte";
-
-const light = new Theme({
-  site: {
-    bg: "white",
-    fg: "black",
-  },
-});
-
-const dark = new Theme({
-  site: {
-    bg: "black",
-    fg: "white",
-  },
-});
+import { defineInkConfig } from "@kraken/ink";
+import { themeState } from "./src/lib/styles/theme.svelte";
+import FluxTheme from "./src/lib/styles/theme";
 
 export default defineInkConfig({
   rootLayout: "./src/routes/+layout.svelte",
   themeMode: "store",
   themeStore: themeState,
-  themes: {
-    light,
-    dark,
-  },
+  themes: FluxTheme,
 });
 ```
 
-Then update the shared store from your app. In Svelte with Runed, changing
-`.current` is reactive and the Ink bridge mirrors it to
-`<html data-ink-theme="...">`.
+The app owns cycling between `default` and the other keys it defines; Ink only
+reflects the selected value. In Svelte with Runed, changing `.current` is
+reactive. For example, this toggles between the root variables and
+`<html data-ink-theme="dark">`:
 
 ```svelte
 <!-- src/routes/+page.svelte -->
 <script lang="ts">
-  import { themeState } from "$lib/theme.svelte";
+  import { themeState } from "$lib/styles/theme.svelte";
 
   function toggleTheme() {
-    themeState.current = themeState.current === "light" ? "dark" : "light";
+    themeState.current = themeState.current === "default" ? "dark" : "default";
   }
 </script>
 
@@ -656,7 +676,7 @@ Then update the shared store from your app. In Svelte with Runed, changing
 ```
 
 Theme tokens continue to be consumed with `tVar`; the active store value chooses
-which theme scope provides the variables.
+the root variables or one of the partial override scopes.
 
 ```svelte
 <!-- src/routes/+layout.svelte -->
@@ -680,9 +700,10 @@ which theme scope provides the variables.
 
 For React or TanStack Start, pass a subscribable store such as one with
 `subscribe` plus `getSnapshot`, `getState`, `get`, or `state`, export it from a
-shared module, and update it through that store's setter. Store values should
-match the keys in `themes`. Because the store bridge imports `ink.config.ts` in
-the client bundle, keep the store-backed config and its imports browser-safe.
+shared module, and update it through that store's setter. Valid store values are
+`default` and the other keys in `themes`. Because the store bridge imports
+`ink.config.ts` in the client bundle, keep the store-backed config and its
+imports browser-safe.
 
 ### React theme helper
 
@@ -995,8 +1016,8 @@ export default defineInkConfig({
 `themes.dark` inside `@media (prefers-color-scheme: dark)`. Use
 `themeMode: "scope"` to keep the existing class/selector-based `@scope`
 switching, `themeMode: "custom"` with `ThemeAdvanced` when each theme should
-carry its own selector, or `themeMode: "store"` with `themeStore` when an app
-store should choose the active theme.
+carry its own selector, or `themeMode: "store"` with `themeStore` and a required
+`themes.default` when an app store should choose the active theme.
 
 The singular `import` field accepts the same inputs as `styles.import(...)`.
 Set `rootLayout` to your root Svelte, Astro, or TS/TSX layout module to have
