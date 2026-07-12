@@ -253,7 +253,8 @@ export default {
 Interfaces and TypeScript parameter annotations can be used in `.ink` modules.
 Function return values follow the same value rules as objects: bare values are
 CSS, while JavaScript expressions use `=`. Block-bodied arrow functions work
-the same way:
+the same way. Typed `.ink` modules use the project's installed TypeScript
+compiler when Vite emits the final JavaScript:
 
 ```ink
 interface Gradient {

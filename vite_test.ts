@@ -6181,7 +6181,7 @@ export default {
   }
 });
 
-Deno.test("resolves typed named functions from .ink modules", () => {
+Deno.test("resolves typed named functions from .ink modules", async () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
   const load = asHook(plugin.load);
@@ -6222,6 +6222,47 @@ export { gradientText, linearGradient }
     );
 
     configResolved({ root, resolve: { alias: [] } });
+    const helperTransformed = transform(
+      Deno.readTextFileSync(helpersId),
+      helpersId,
+    );
+    assert(
+      helperTransformed && typeof helperTransformed === "object" &&
+        "code" in helperTransformed,
+    );
+    const helperCode = String(helperTransformed.code);
+    assert(!helperCode.includes("interface Gradient"));
+    assert(!helperCode.includes("gradient: string"));
+    assert(
+      helperCode.includes("function linearGradient({ direction, from, to })"),
+      helperCode,
+    );
+    const runtimeId = `${libDir}/gradients.mjs`;
+    Deno.writeTextFileSync(runtimeId, helperCode);
+    const runtimeModule = await import(
+      `${toFileUrl(runtimeId).href}?${crypto.randomUUID()}`
+    ) as {
+      gradientText: (gradient: string) => Record<string, string>;
+      linearGradient: (gradient: {
+        direction: string;
+        from: string;
+        to: string;
+      }) => string;
+    };
+    const runtimeGradient = runtimeModule.linearGradient({
+      direction: "90deg",
+      from: "red",
+      to: "blue",
+    });
+    assertEquals(
+      runtimeModule.gradientText(runtimeGradient),
+      {
+        background: "linear-gradient(90deg, red, blue)",
+        backgroundClip: "text",
+        color: "transparent",
+      },
+    );
+
     const moduleCode = `import ink from "@kraken/ink";\n` +
       `import { gradientText, linearGradient } from "./gradients.ink";\n` +
       `const styles = new ink();\n` +

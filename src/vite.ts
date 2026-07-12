@@ -4259,7 +4259,9 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       const calls = transformTargets.calls;
 
       const transformedModule = (moduleCode: string) => ({
-        code: moduleCode,
+        code: isInkModule
+          ? (getTsTranspiler()?.(moduleCode) ?? moduleCode)
+          : moduleCode,
         map: null,
       });
 
