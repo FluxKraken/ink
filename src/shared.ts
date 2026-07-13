@@ -298,6 +298,16 @@ export interface ResolvedTailwindConfigCss {
 /** Style resolution mode used by the Vite plugin. */
 export type InkResolution = "static" | "dynamic" | "hybrid";
 
+/** Persistence metadata used to restore a store-backed theme before paint. */
+export interface InkThemeBootstrapOptions {
+  /** Storage key containing the selected theme name. */
+  key: string;
+  /** Browser storage containing the selection. Defaults to `localStorage`. */
+  storage?: "localStorage" | "sessionStorage";
+  /** Stored-value encoding. Defaults to JSON. */
+  deserialize?: "json" | "raw";
+}
+
 /** Debug logging options accepted by `ink.config.ts`. */
 export interface InkConfigDebugOptions {
   /** Log runtime fallback decisions. */
@@ -354,6 +364,20 @@ export type InkConfigFile =
       themeMode: "store";
       /** Store-like value whose current value names the active theme. */
       themeStore?: ThemeStore;
+      /** Restore the persisted theme synchronously in production before paint. */
+      themeBootstrap: InkThemeBootstrapOptions;
+      /** Svelte root layout that receives the production bootstrap script. */
+      rootLayout: string;
+      /** Project-wide themes, including the required `default` root theme. */
+      themes: StoreThemesInput;
+    }
+    | {
+      /** Store-backed themes require a `default` root theme. */
+      themeMode: "store";
+      /** Store-like value whose current value names the active theme. */
+      themeStore?: ThemeStore;
+      /** Omit to leave pre-paint theme restoration to the application. */
+      themeBootstrap?: never;
       /** Project-wide themes, including the required `default` root theme. */
       themes: StoreThemesInput;
     }
@@ -362,6 +386,8 @@ export type InkConfigFile =
       themeMode?: Exclude<ThemeMode, "store">;
       /** Store-like value used only when `themeMode` is `"store"`. */
       themeStore?: ThemeStore;
+      /** Theme bootstrapping is only available with `themeMode: "store"`. */
+      themeBootstrap?: never;
       /** Project-wide themes emitted into the shared stylesheet. */
       themes?: ImportedThemesInput;
     }

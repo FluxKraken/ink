@@ -50,6 +50,10 @@ import {
   generateStaticAccessorExpression,
   type StaticAccessorModel,
 } from "./static-codegen.js";
+import {
+  generateThemeBootstrapScript,
+  type ThemeBootstrapConfig,
+} from "./theme-bootstrap.js";
 
 const PUBLIC_VIRTUAL_ID = "virtual:ink/styles.css";
 const RESOLVED_VIRTUAL_ID = "\0virtual:ink/styles.css";
@@ -173,6 +177,7 @@ type LoadedInkConfig = {
   themeMode: ThemeMode;
   hasThemeStore: boolean;
   themeNames: string[];
+  themeBootstrap: ThemeBootstrapConfig | null;
   themeStoreRuntimeImport: {
     source: string;
     binding: ImportBinding;
@@ -1156,6 +1161,103 @@ function addThemeStoreRuntimeImport(
   return addVirtualImportToModule(code, options, importId);
 }
 
+const THEME_BOOTSTRAP_MARKER = "data-ink-theme-bootstrap";
+
+type SvelteHeadOpening = {
+  start: number;
+  end: number;
+  selfClosing: boolean;
+};
+
+function findSvelteHeadOpening(
+  code: string,
+  id: string,
+  projectRoot: string,
+  viteRoot: string,
+): SvelteHeadOpening | null {
+  let headStart = -1;
+  const compiler = loadProjectSvelteCompiler(projectRoot, viteRoot);
+  if (compiler) {
+    try {
+      const ast = compiler.parse(code, { modern: true, filename: id });
+      const fragment = (ast as { fragment?: { nodes?: unknown } })?.fragment;
+      const nodes = Array.isArray(fragment?.nodes) ? fragment.nodes : [];
+      const head = nodes.find((node) =>
+        (node as { type?: unknown })?.type === "SvelteHead"
+      ) as { start?: unknown } | undefined;
+      if (typeof head?.start === "number") {
+        headStart = head.start;
+      }
+    } catch {
+      // Let Svelte report malformed component source during its normal compile.
+    }
+  }
+
+  if (headStart < 0) {
+    headStart = code.indexOf("<svelte:head");
+  }
+  if (headStart < 0) {
+    return null;
+  }
+
+  let quote: '"' | "'" | "" = "";
+  for (let index = headStart; index < code.length; index += 1) {
+    const char = code[index];
+    if (quote) {
+      if (char === quote && code[index - 1] !== "\\") {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === ">") {
+      let lastToken = index - 1;
+      while (lastToken > headStart && /\s/.test(code[lastToken])) {
+        lastToken -= 1;
+      }
+      return {
+        start: headStart,
+        end: index + 1,
+        selfClosing: code[lastToken] === "/",
+      };
+    }
+  }
+
+  return null;
+}
+
+function addThemeBootstrapToSvelte(
+  code: string,
+  script: string,
+  options: { id: string; projectRoot: string; viteRoot: string },
+): string {
+  if (code.includes(THEME_BOOTSTRAP_MARKER)) {
+    return code;
+  }
+
+  const scriptElement = `<script ${THEME_BOOTSTRAP_MARKER}>${script}</script>`;
+  const headOpening = findSvelteHeadOpening(
+    code,
+    options.id,
+    options.projectRoot,
+    options.viteRoot,
+  );
+  if (headOpening === null) {
+    return `<svelte:head>\n${scriptElement}\n</svelte:head>\n${code}`;
+  }
+  if (headOpening.selfClosing) {
+    return code.slice(0, headOpening.start) +
+      `<svelte:head>\n${scriptElement}\n</svelte:head>` +
+      code.slice(headOpening.end);
+  }
+
+  return code.slice(0, headOpening.end) + `\n${scriptElement}` +
+    code.slice(headOpening.end);
+}
+
 function loadProjectSvelteCompiler(
   projectRoot: string,
   viteRoot: string,
@@ -1589,6 +1691,56 @@ function normalizeThemeMode(value: unknown): ThemeMode {
       value === "custom" || value === "store"
     ? value
     : "color-scheme";
+}
+
+function normalizeThemeBootstrap(
+  value: unknown,
+  themeMode: ThemeMode,
+): ThemeBootstrapConfig | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (themeMode !== "store") {
+    throw new Error(
+      '[ink] themeBootstrap is only supported with themeMode: "store".',
+    );
+  }
+  if (!isRecord(value)) {
+    throw new Error(
+      "[ink] themeBootstrap must be an object with a non-empty string key.",
+    );
+  }
+
+  const supportedKeys = new Set(["key", "storage", "deserialize"]);
+  const unknownKey = Object.keys(value).find((key) => !supportedKeys.has(key));
+  if (unknownKey) {
+    throw new Error(
+      `[ink] themeBootstrap contains an unsupported option: ${unknownKey}.`,
+    );
+  }
+
+  const key = typeof value.key === "string" ? value.key : "";
+  if (key.trim().length === 0) {
+    throw new Error(
+      "[ink] themeBootstrap must be an object with a non-empty string key.",
+    );
+  }
+
+  const storage = value.storage ?? "localStorage";
+  if (storage !== "localStorage" && storage !== "sessionStorage") {
+    throw new Error(
+      '[ink] themeBootstrap.storage must be "localStorage" or "sessionStorage".',
+    );
+  }
+
+  const deserialize = value.deserialize ?? "json";
+  if (deserialize !== "json" && deserialize !== "raw") {
+    throw new Error(
+      '[ink] themeBootstrap.deserialize must be "json" or "raw".',
+    );
+  }
+
+  return { key, storage, deserialize };
 }
 
 function assertStoreThemeConfig(
@@ -2773,6 +2925,7 @@ function loadInkConfig(
       themeMode: "color-scheme",
       hasThemeStore: false,
       themeNames: [],
+      themeBootstrap: null,
       themeStoreRuntimeImport: null,
       resolution: "hybrid",
       hasExplicitResolution: false,
@@ -2879,6 +3032,10 @@ function loadInkConfig(
   const resolution = normalizeResolution(configObject.resolution);
   const themeMode = normalizeThemeMode(configObject.themeMode);
   assertStoreThemeConfig(configObject, themeMode);
+  const themeBootstrap = normalizeThemeBootstrap(
+    configObject.themeBootstrap,
+    themeMode,
+  );
   const hasThemeStore = Object.prototype.hasOwnProperty.call(
     configObject,
     "themeStore",
@@ -2990,6 +3147,16 @@ function loadInkConfig(
     configObject.rootLayout,
     configDir,
   );
+  if (themeBootstrap && !rootLayout) {
+    throw new Error(
+      "[ink] themeBootstrap requires rootLayout so Ink can inject the pre-paint script.",
+    );
+  }
+  if (themeBootstrap && !rootLayout?.endsWith(".svelte")) {
+    throw new Error(
+      "[ink] themeBootstrap currently requires rootLayout to reference a Svelte component.",
+    );
+  }
   const configGlobalRules = {
     ...rootVarsToGlobalRules([
       ...(parsedThemes?.root ?? parsedThemes?.rootVars ?? []),
@@ -3053,6 +3220,7 @@ function loadInkConfig(
     themeMode,
     hasThemeStore,
     themeNames,
+    themeBootstrap,
     themeStoreRuntimeImport,
     resolution,
     hasExplicitResolution,
@@ -4306,6 +4474,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     themeMode: "color-scheme",
     hasThemeStore: false,
     themeNames: [],
+    themeBootstrap: null,
     themeStoreRuntimeImport: null,
     resolution: "hybrid",
     hasExplicitResolution: false,
@@ -4767,6 +4936,27 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         map: null,
       });
 
+      const addProductionThemeBootstrap = (moduleCode: string): string => {
+        if (
+          !isBuild || !isRootLayout || !isSvelte ||
+          !inkConfig.themeBootstrap
+        ) {
+          return moduleCode;
+        }
+        return addThemeBootstrapToSvelte(
+          moduleCode,
+          generateThemeBootstrapScript(
+            inkConfig.themeBootstrap,
+            inkConfig.themeNames,
+          ),
+          {
+            id: normalizedId,
+            projectRoot,
+            viteRoot,
+          },
+        );
+      };
+
       if (calls.length === 0 && newInkDecls.length === 0) {
         const didVirtualCssChange = clearManagedModuleState(normalizedId);
         if (didVirtualCssChange) {
@@ -4783,7 +4973,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               isAstro,
             });
           }
-          return transformedModule(nextCode);
+          return transformedModule(addProductionThemeBootstrap(nextCode));
         }
 
         if (isInkModule) {
@@ -4802,7 +4992,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         nextCode = isSvelte
           ? addVirtualImportToSvelte(nextCode)
           : addVirtualImportToAstro(nextCode);
-        return transformedModule(nextCode);
+        return transformedModule(addProductionThemeBootstrap(nextCode));
       }
 
       const replacements: Array<{ start: number; end: number; text: string }> =
@@ -5892,7 +6082,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           queueDevCssRefresh();
         }
 
-        return transformedModule(nextCode);
+        return transformedModule(addProductionThemeBootstrap(nextCode));
       };
 
       const hasImportModule = /\.importModule\s*\(/.test(transformInputCode);

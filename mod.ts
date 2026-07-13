@@ -86,3 +86,5 @@ export type { StoreThemesInput } from "./src/index.ts";
 export type { InkConfigFile } from "./src/index.ts";
 /** Style resolution mode used by the Vite plugin. */
 export type { InkResolution } from "./src/index.ts";
+/** Persistence metadata used to restore a store-backed theme before paint. */
+export type { InkThemeBootstrapOptions } from "./src/index.ts";

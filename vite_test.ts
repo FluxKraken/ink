@@ -1074,6 +1074,279 @@ Deno.test("injects Svelte theme-store runtime in configured Svelte root layout",
   }
 });
 
+Deno.test("injects one production theme bootstrap into an existing Svelte head", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.mkdirSync(`${root}/src/lib`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/lib/theme.svelte.ts`,
+      `export const themeMode = { current: "default" };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { themeMode } from "./src/lib/theme.svelte";\n` +
+        `export default {\n` +
+        `  rootLayout: "./src/routes/+layout.svelte",\n` +
+        `  resolution: "static",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore: themeMode,\n` +
+        `  themeBootstrap: { key: "themeMode" },\n` +
+        `  themes: {\n` +
+        `    default: { bg: "white" },\n` +
+        `    dark: { bg: "black" },\n` +
+        `  },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({
+      root,
+      command: "build",
+      resolve: { alias: [] },
+    });
+
+    const layoutId = `${root}/src/routes/+layout.svelte`;
+    const source = `<script lang="ts">\nconst existing = true;\n</script>\n` +
+      `<svelte:head>\n` +
+      `  <link rel="icon" href="/favicon.svg" />\n` +
+      `  <title>Existing title</title>\n` +
+      `</svelte:head>\n` +
+      `<slot />`;
+    const transformed = transform(source, layoutId);
+    assert(
+      transformed && typeof transformed === "object" &&
+        "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assertEquals((code.match(/<svelte:head\b/g) ?? []).length, 1);
+    assertEquals(
+      (code.match(/<script data-ink-theme-bootstrap>/g) ?? []).length,
+      1,
+    );
+    assertEquals(
+      (code.match(/data-ink-theme-bootstrap/g) ?? []).length,
+      1,
+    );
+    assert(code.includes('<link rel="icon" href="/favicon.svg" />'));
+    assert(code.includes("<title>Existing title</title>"));
+    assert(code.includes('import "virtual:ink/styles.css";'));
+    assert(code.includes('import "virtual:ink/theme-store.svelte.ts";'));
+    assert(code.includes('localStorage.getItem("themeMode")'));
+    assert(code.includes('["dark"].includes(candidate)'));
+
+    const headStart = code.indexOf("<svelte:head");
+    const headEnd = code.indexOf("</svelte:head>", headStart);
+    const bootstrap = code.indexOf("data-ink-theme-bootstrap");
+    const existingLink = code.indexOf('<link rel="icon"');
+    assert(headStart < bootstrap && bootstrap < headEnd);
+    assert(bootstrap < existingLink && existingLink < headEnd);
+
+    const transformedAgain = transform(code, layoutId);
+    assert(
+      transformedAgain && typeof transformedAgain === "object" &&
+        "code" in transformedAgain,
+    );
+    const codeAgain = transformedAgain.code as string;
+    assertEquals((codeAgain.match(/<svelte:head\b/g) ?? []).length, 1);
+    assertEquals(
+      (codeAgain.match(/data-ink-theme-bootstrap/g) ?? []).length,
+      1,
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("creates or expands one Svelte head for a production theme bootstrap", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default {\n` +
+        `  rootLayout: "./src/routes/+layout.svelte",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore: { current: "default" },\n` +
+        `  themeBootstrap: { key: "themeMode" },\n` +
+        `  themes: { default: { bg: "white" }, dark: { bg: "black" } },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({
+      root,
+      command: "build",
+      resolve: { alias: [] },
+    });
+
+    for (const source of [`<slot />`, `<svelte:head />\n<slot />`]) {
+      const transformed = transform(
+        source,
+        `${root}/src/routes/+layout.svelte`,
+      );
+      assert(
+        transformed && typeof transformed === "object" &&
+          "code" in transformed,
+      );
+
+      const code = transformed.code as string;
+      assertEquals((code.match(/<svelte:head\b/g) ?? []).length, 1);
+      assertEquals((code.match(/<\/svelte:head>/g) ?? []).length, 1);
+      assertEquals(
+        (code.match(/data-ink-theme-bootstrap/g) ?? []).length,
+        1,
+      );
+      assert(!code.includes("<svelte:head />"));
+      assert(
+        code.indexOf("data-ink-theme-bootstrap") < code.indexOf("<slot"),
+      );
+    }
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("omits the theme bootstrap during serve while retaining the bridge", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default {\n` +
+        `  rootLayout: "./src/routes/+layout.svelte",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore: { current: "default" },\n` +
+        `  themeBootstrap: { key: "themeMode" },\n` +
+        `  themes: { default: { bg: "white" }, dark: { bg: "black" } },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({
+      root,
+      command: "serve",
+      resolve: { alias: [] },
+    });
+
+    const transformed = transform(
+      `<svelte:head><title>Development</title></svelte:head>\n<slot />`,
+      `${root}/src/routes/+layout.svelte`,
+    );
+    assert(
+      transformed && typeof transformed === "object" &&
+        "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(!code.includes("data-ink-theme-bootstrap"));
+    assert(!code.includes('localStorage.getItem("themeMode")'));
+    assert(code.includes('import "virtual:ink/theme-store.svelte.ts";'));
+    assert(code.includes("<title>Development</title>"));
+
+    const runtime = load(SVELTE_THEME_STORE_RUNTIME_VIRTUAL_ID) as string;
+    assert(runtime.includes("data-ink-theme"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("validates theme bootstrap config and its Svelte root target", () => {
+  const cases = [
+    {
+      config: `export default { themeBootstrap: { key: "themeMode" } };\n`,
+      expected: 'themeBootstrap is only supported with themeMode: "store"',
+    },
+    {
+      config: `export default {\n` +
+        `  themeMode: "store",\n` +
+        `  themeBootstrap: { key: "themeMode" },\n` +
+        `  themes: { default: { bg: "white" } },\n` +
+        `};\n`,
+      expected: "themeBootstrap requires rootLayout",
+    },
+    {
+      config: `export default {\n` +
+        `  rootLayout: "./src/root.tsx",\n` +
+        `  themeMode: "store",\n` +
+        `  themeBootstrap: { key: "themeMode" },\n` +
+        `  themes: { default: { bg: "white" } },\n` +
+        `};\n`,
+      expected:
+        "themeBootstrap currently requires rootLayout to reference a Svelte component",
+    },
+    {
+      config: `export default {\n` +
+        `  rootLayout: "./src/+layout.svelte",\n` +
+        `  themeMode: "store",\n` +
+        `  themeBootstrap: { key: "themeMode", deserialize: "xml" },\n` +
+        `  themes: { default: { bg: "white" } },\n` +
+        `};\n`,
+      expected: 'themeBootstrap.deserialize must be "json" or "raw"',
+    },
+    {
+      config: `export default {\n` +
+        `  rootLayout: "./src/+layout.svelte",\n` +
+        `  themeMode: "store",\n` +
+        `  themeBootstrap: { key: "   " },\n` +
+        `  themes: { default: { bg: "white" } },\n` +
+        `};\n`,
+      expected: "themeBootstrap must be an object with a non-empty string key",
+    },
+    {
+      config: `export default {\n` +
+        `  rootLayout: "./src/+layout.svelte",\n` +
+        `  themeMode: "store",\n` +
+        `  themeBootstrap: { key: "themeMode", storage: "cookie" },\n` +
+        `  themes: { default: { bg: "white" } },\n` +
+        `};\n`,
+      expected:
+        'themeBootstrap.storage must be "localStorage" or "sessionStorage"',
+    },
+    {
+      config: `export default {\n` +
+        `  rootLayout: "./src/+layout.svelte",\n` +
+        `  themeMode: "store",\n` +
+        `  themeBootstrap: { key: "themeMode", serializer: "json" },\n` +
+        `  themes: { default: { bg: "white" } },\n` +
+        `};\n`,
+      expected: "themeBootstrap contains an unsupported option: serializer",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const root = Deno.makeTempDirSync();
+    try {
+      Deno.writeTextFileSync(`${root}/ink.config.ts`, testCase.config);
+      const plugin = inkVite();
+      const configResolved = asHook(plugin.configResolved);
+      assertThrows(
+        () =>
+          configResolved({
+            root,
+            command: "build",
+            resolve: { alias: [] },
+          }),
+        Error,
+        testCase.expected,
+      );
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+    }
+  }
+});
+
 Deno.test("injects a theme-store runtime fallback when rootLayout is omitted", () => {
   const root = Deno.makeTempDirSync();
 
@@ -3107,6 +3380,7 @@ Deno.test("published types accept store-backed theme config", () => {
   assertPackageTypesSucceed(`
     import {
       defineInkConfig,
+      type InkThemeBootstrapOptions,
       type StoreThemesInput,
       type ThemeStore,
       type ThemeStoreUnsubscribe,
@@ -3134,9 +3408,17 @@ Deno.test("published types accept store-backed theme config", () => {
       sepia: { surface: "#704214" },
     } satisfies StoreThemesInput;
 
+    const themeBootstrap = {
+      key: "themeMode",
+      storage: "localStorage",
+      deserialize: "json",
+    } satisfies InkThemeBootstrapOptions;
+
     export const reactConfig = defineInkConfig({
+      rootLayout: "./src/routes/+layout.svelte",
       themeMode: "store",
       themeStore: reactStore,
+      themeBootstrap,
       themes,
     });
 
@@ -3151,6 +3433,16 @@ Deno.test("published types accept store-backed theme config", () => {
       themeMode: "store",
       themeStore: tanstackStore,
       themes: { sepia: { surface: "#704214" } },
+    });
+
+    // @ts-expect-error theme bootstrap is only valid in store mode
+    defineInkConfig({ themeBootstrap });
+
+    // @ts-expect-error theme bootstrap needs a root layout injection target
+    defineInkConfig({
+      themeMode: "store",
+      themeBootstrap,
+      themes,
     });
   `);
 });

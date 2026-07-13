@@ -614,6 +614,15 @@ With `resolution: "static"`, that separate importable module is required: Ink's
 theme bridge imports the store directly, while the config object, theme
 constructors, and palettes remain build-time-only.
 
+If the store persists its selection, add `themeBootstrap` to prevent the
+default root theme from flashing before the client bridge loads. Ink injects a
+small synchronous script into the configured Svelte root layout during
+production builds only. The script reads the selected theme before first paint,
+whitelists it against the configured theme names, and sets `data-ink-theme`.
+This pre-paint behavior applies when the layout is server-rendered or
+prerendered; a client-only Svelte app must put an equivalent bootstrap in its
+document template. Development behavior is unchanged.
+
 ```ts
 // src/lib/styles/theme.svelte.ts
 import { PersistedState } from "runed";
@@ -656,9 +665,30 @@ export default defineInkConfig({
   rootLayout: "./src/routes/+layout.svelte",
   themeMode: "store",
   themeStore: themeState,
+  themeBootstrap: { key: "themeMode" },
   themes: FluxTheme,
 });
 ```
+
+`themeBootstrap` defaults to `localStorage` with JSON deserialization, matching
+Runed `PersistedState`. Raw values and session storage are also supported:
+
+```ts
+themeBootstrap: {
+  key: "themeMode",
+  storage: "sessionStorage",
+  deserialize: "raw",
+}
+```
+
+Automatic pre-paint injection currently requires `rootLayout` to reference a
+Svelte component. The regular reactive bridge remains in the client bundle so
+theme changes after startup continue to work. The self-contained bootstrap also
+remains in the compiled root component so Svelte's server and client head
+structure stays aligned, but it does not import Ink, the config, themes, or
+builders. Because the bootstrap is an inline script, applications with a strict
+Content Security Policy must allow its exact build output with an appropriate
+script hash. Ink does not attach a nonce to the generated script.
 
 The app owns cycling between `default` and the other keys it defines; Ink only
 reflects the selected value. In Svelte with Runed, changing `.current` is

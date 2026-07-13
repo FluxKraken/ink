@@ -15,6 +15,7 @@ import {
   ImportedThemesInput,
   InkConfigFile,
   InkResolution,
+  InkThemeBootstrapOptions,
   LayeredApplyInput,
   PrimitiveStyleValue,
   SetInput,
@@ -272,6 +273,8 @@ export type { StoreThemesInput };
 export type { InkConfigFile };
 /** Style resolution mode used by the Vite plugin. */
 export type { InkResolution };
+/** Persistence metadata used to restore a store-backed theme before paint. */
+export type { InkThemeBootstrapOptions };
 /** Re-exported Theme constructor. */
 export { Theme };
 /** Re-exported ThemeAdvanced constructor. */

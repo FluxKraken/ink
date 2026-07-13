@@ -137,3 +137,5 @@ export type { StoreThemesInput } from "./shared.js";
 export type { InkConfigFile } from "./shared.js";
 /** Style resolution mode used by the Vite plugin. */
 export type { InkResolution } from "./shared.js";
+/** Persistence metadata used to restore a store-backed theme before paint. */
+export type { InkThemeBootstrapOptions } from "./shared.js";
