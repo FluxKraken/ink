@@ -82,6 +82,44 @@ export type CollectTransformTargetsOptions = {
   inkImportSources: readonly string[];
 };
 
+export type AstInkConfigPropertyExpression = {
+  expressionSource: string;
+  identifierPath: string[] | null;
+};
+
+export type ExtractInkConfigPropertyExpressionOptions = {
+  typescript: TypeScriptAstApi | null;
+  code: string;
+  id: string;
+  property: string;
+};
+
+export type AstSourceReplacement = {
+  start: number;
+  end: number;
+  replacement: string;
+};
+
+export type CollectUnusedRuntimeImportReplacementsOptions = {
+  typescript: TypeScriptAstApi | null;
+  code: string;
+  id: string;
+  /** Local import binding names that this transform is allowed to remove. */
+  removableIdentifiers: ReadonlySet<string>;
+  /**
+   * Import sources whose declarations may be removed completely. Other
+   * sources are retained as side-effect-only imports when their last binding
+   * is consumed by static extraction.
+   */
+  sideEffectFreeSources?: ReadonlySet<string>;
+};
+
+export type CollectRuntimeIdentifierReferencesOptions = {
+  typescript: TypeScriptAstApi | null;
+  code: string;
+  id: string;
+};
+
 const BUILDER_ASSIGNMENT_PROPERTIES = new Set([
   "base",
   "global",
@@ -467,6 +505,1051 @@ export function parseModuleStaticInfo(
   };
 }
 
+function unwrapAstExpression(
+  node: unknown,
+  typescript: TypeScriptAstApi,
+): unknown {
+  const syntaxKind = typescript.SyntaxKind;
+  const seen = new Set<unknown>();
+  let current = node;
+
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const kind = (current as { kind?: number }).kind;
+    if (
+      kind !== syntaxKind.ParenthesizedExpression &&
+      kind !== syntaxKind.AsExpression &&
+      kind !== syntaxKind.SatisfiesExpression &&
+      kind !== syntaxKind.TypeAssertionExpression &&
+      kind !== syntaxKind.NonNullExpression
+    ) {
+      break;
+    }
+
+    const expression = (current as { expression?: unknown }).expression;
+    if (!expression) {
+      break;
+    }
+    current = expression;
+  }
+
+  return current;
+}
+
+function astStaticPropertyName(
+  node: unknown,
+  typescript: TypeScriptAstApi,
+): string | null {
+  const syntaxKind = typescript.SyntaxKind;
+  const unwrapped = unwrapAstExpression(node, typescript);
+  if (!unwrapped || typeof unwrapped !== "object") {
+    return null;
+  }
+
+  const kind = (unwrapped as { kind?: number }).kind;
+  if (
+    kind === syntaxKind.Identifier ||
+    kind === syntaxKind.StringLiteral ||
+    kind === syntaxKind.NumericLiteral ||
+    kind === syntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return astIdentifierText(unwrapped);
+  }
+
+  if (kind !== syntaxKind.ComputedPropertyName) {
+    return null;
+  }
+
+  const expression = unwrapAstExpression(
+    (unwrapped as { expression?: unknown }).expression,
+    typescript,
+  );
+  if (!expression || typeof expression !== "object") {
+    return null;
+  }
+  const expressionKind = (expression as { kind?: number }).kind;
+  if (
+    expressionKind !== syntaxKind.StringLiteral &&
+    expressionKind !== syntaxKind.NumericLiteral &&
+    expressionKind !== syntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return null;
+  }
+  return astIdentifierText(expression);
+}
+
+function astSimpleIdentifierPath(
+  node: unknown,
+  typescript: TypeScriptAstApi,
+): string[] | null {
+  const syntaxKind = typescript.SyntaxKind;
+  const unwrapped = unwrapAstExpression(node, typescript);
+  if (!unwrapped || typeof unwrapped !== "object") {
+    return null;
+  }
+
+  const kind = (unwrapped as { kind?: number }).kind;
+  if (kind === syntaxKind.Identifier) {
+    const name = astIdentifierText(unwrapped);
+    return name ? [name] : null;
+  }
+
+  if (kind === syntaxKind.PropertyAccessExpression) {
+    const access = unwrapped as {
+      expression?: unknown;
+      name?: unknown;
+      questionDotToken?: unknown;
+    };
+    if (access.questionDotToken) {
+      return null;
+    }
+    const parentPath = astSimpleIdentifierPath(access.expression, typescript);
+    const name = astIdentifierText(access.name);
+    return parentPath && name ? [...parentPath, name] : null;
+  }
+
+  if (kind === syntaxKind.ElementAccessExpression) {
+    const access = unwrapped as {
+      expression?: unknown;
+      argumentExpression?: unknown;
+      questionDotToken?: unknown;
+    };
+    if (access.questionDotToken) {
+      return null;
+    }
+    const parentPath = astSimpleIdentifierPath(access.expression, typescript);
+    const name = astStaticPropertyName(
+      access.argumentExpression,
+      typescript,
+    );
+    return parentPath && name ? [...parentPath, name] : null;
+  }
+
+  return null;
+}
+
+/**
+ * Finds a property expression on an ink.config module's default object export.
+ * Returns null when the default export cannot be followed without evaluation.
+ */
+export function extractInkConfigPropertyExpression(
+  options: ExtractInkConfigPropertyExpressionOptions,
+): AstInkConfigPropertyExpression | null {
+  const typescript = options.typescript;
+  if (!typescript || options.property.length === 0) {
+    return null;
+  }
+
+  let sourceFile: Record<string, unknown>;
+  try {
+    sourceFile = createSourceFile(typescript, options.code, options.id);
+  } catch {
+    return null;
+  }
+
+  const statements = sourceFile.statements;
+  if (!Array.isArray(statements)) {
+    return null;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  const initializers = new Map<string, unknown>();
+  const ambiguousBindings = new Set<string>();
+  const defineInkConfigBindings = new Set(["defineInkConfig"]);
+  let defaultExportExpression: unknown = null;
+  let ambiguousDefaultExport = false;
+
+  const registerDefaultExport = (expression: unknown): void => {
+    if (defaultExportExpression) {
+      ambiguousDefaultExport = true;
+      return;
+    }
+    defaultExportExpression = expression;
+  };
+
+  for (const statement of statements) {
+    if (!statement || typeof statement !== "object") {
+      continue;
+    }
+    const kind = (statement as { kind?: number }).kind;
+
+    if (kind === syntaxKind.ImportDeclaration) {
+      const clause = (statement as {
+        importClause?: { isTypeOnly?: boolean; namedBindings?: unknown };
+      }).importClause;
+      if (clause?.isTypeOnly === true) {
+        continue;
+      }
+      const namedBindings = clause?.namedBindings as {
+        kind?: number;
+        elements?: unknown[];
+      } | undefined;
+      if (namedBindings?.kind !== syntaxKind.NamedImports) {
+        continue;
+      }
+      for (const element of namedBindings.elements ?? []) {
+        if (isTypeOnlyNode(element)) {
+          continue;
+        }
+        const imported = astIdentifierText(
+          (element as { propertyName?: unknown }).propertyName,
+        ) ?? astIdentifierText((element as { name?: unknown }).name);
+        const local = astIdentifierText((element as { name?: unknown }).name);
+        if (imported === "defineInkConfig" && local) {
+          defineInkConfigBindings.add(local);
+        }
+      }
+      continue;
+    }
+
+    if (kind === syntaxKind.VariableStatement) {
+      const declarations =
+        (statement as { declarationList?: { declarations?: unknown[] } })
+          .declarationList?.declarations;
+      for (const declaration of declarations ?? []) {
+        const declarationNode = declaration as {
+          name?: unknown;
+          initializer?: unknown;
+        };
+        const name = astIdentifierText(declarationNode.name);
+        if (!name || !declarationNode.initializer) {
+          continue;
+        }
+        if (initializers.has(name)) {
+          initializers.delete(name);
+          ambiguousBindings.add(name);
+          continue;
+        }
+        if (!ambiguousBindings.has(name)) {
+          initializers.set(name, declarationNode.initializer);
+        }
+      }
+      continue;
+    }
+
+    if (kind === syntaxKind.ExportAssignment) {
+      const exportNode = statement as {
+        isExportEquals?: boolean;
+        expression?: unknown;
+      };
+      if (exportNode.isExportEquals !== true && exportNode.expression) {
+        registerDefaultExport(exportNode.expression);
+      }
+      continue;
+    }
+
+    if (kind === syntaxKind.ExportDeclaration) {
+      const exportNode = statement as {
+        isTypeOnly?: boolean;
+        exportClause?: { kind?: number; elements?: unknown[] };
+        moduleSpecifier?: unknown;
+      };
+      if (
+        exportNode.isTypeOnly === true ||
+        exportNode.moduleSpecifier ||
+        exportNode.exportClause?.kind !== syntaxKind.NamedExports
+      ) {
+        continue;
+      }
+      for (const element of exportNode.exportClause.elements ?? []) {
+        if (
+          isTypeOnlyNode(element) ||
+          astIdentifierText((element as { name?: unknown }).name) !== "default"
+        ) {
+          continue;
+        }
+        const localName = (element as { propertyName?: unknown }).propertyName;
+        if (localName) {
+          registerDefaultExport(localName);
+        }
+      }
+    }
+  }
+
+  if (!defaultExportExpression || ambiguousDefaultExport) {
+    return null;
+  }
+
+  const resolvingBindings = new Set<string>();
+  const resolveConfigObject = (node: unknown): unknown | null => {
+    const expression = unwrapAstExpression(node, typescript);
+    if (!expression || typeof expression !== "object") {
+      return null;
+    }
+
+    const kind = (expression as { kind?: number }).kind;
+    if (kind === syntaxKind.ObjectLiteralExpression) {
+      return expression;
+    }
+
+    if (kind === syntaxKind.Identifier) {
+      const name = astIdentifierText(expression);
+      if (
+        !name ||
+        ambiguousBindings.has(name) ||
+        resolvingBindings.has(name)
+      ) {
+        return null;
+      }
+      const initializer = initializers.get(name);
+      if (!initializer) {
+        return null;
+      }
+      resolvingBindings.add(name);
+      const object = resolveConfigObject(initializer);
+      resolvingBindings.delete(name);
+      return object;
+    }
+
+    if (kind !== syntaxKind.CallExpression) {
+      return null;
+    }
+
+    const call = expression as {
+      expression?: unknown;
+      arguments?: unknown[];
+      questionDotToken?: unknown;
+    };
+    if (
+      call.questionDotToken ||
+      !Array.isArray(call.arguments) ||
+      call.arguments.length !== 1
+    ) {
+      return null;
+    }
+    const calleePath = astSimpleIdentifierPath(call.expression, typescript);
+    const isDefineInkConfig = calleePath?.length === 1
+      ? defineInkConfigBindings.has(calleePath[0])
+      : calleePath?.[calleePath.length - 1] === "defineInkConfig";
+    return isDefineInkConfig ? resolveConfigObject(call.arguments[0]) : null;
+  };
+
+  const configObject = resolveConfigObject(defaultExportExpression) as {
+    properties?: unknown[];
+  } | null;
+  if (!configObject || !Array.isArray(configObject.properties)) {
+    return null;
+  }
+
+  let propertyExpression: unknown = null;
+  for (const property of configObject.properties) {
+    if (!property || typeof property !== "object") {
+      propertyExpression = null;
+      continue;
+    }
+    const kind = (property as { kind?: number }).kind;
+    if (kind === syntaxKind.SpreadAssignment) {
+      propertyExpression = null;
+      continue;
+    }
+
+    const propertyName = astStaticPropertyName(
+      (property as { name?: unknown }).name,
+      typescript,
+    );
+    if (propertyName === null) {
+      propertyExpression = null;
+      continue;
+    }
+    if (propertyName !== options.property) {
+      continue;
+    }
+
+    if (kind === syntaxKind.PropertyAssignment) {
+      propertyExpression =
+        (property as { initializer?: unknown }).initializer ??
+          null;
+      continue;
+    }
+    if (
+      kind === syntaxKind.ShorthandPropertyAssignment &&
+      !(property as { objectAssignmentInitializer?: unknown })
+        .objectAssignmentInitializer
+    ) {
+      propertyExpression = (property as { name?: unknown }).name ?? null;
+      continue;
+    }
+    propertyExpression = null;
+  }
+
+  if (!propertyExpression) {
+    return null;
+  }
+  const expressionSource = astNodeText(
+    propertyExpression,
+    options.code,
+    sourceFile,
+  ).trim();
+  if (!expressionSource) {
+    return null;
+  }
+
+  return {
+    expressionSource,
+    identifierPath: astSimpleIdentifierPath(propertyExpression, typescript),
+  };
+}
+
+type AstRuntimeImportBinding = {
+  localName: string;
+  node: unknown;
+};
+
+type AstNamedImportBinding = AstRuntimeImportBinding & {
+  typeOnly: boolean;
+};
+
+type AstRuntimeImportPlan = {
+  statement: unknown;
+  clause: unknown;
+  moduleSpecifier: unknown;
+  moduleSource: string;
+  defaultBinding: AstRuntimeImportBinding | null;
+  namespaceBinding: AstRuntimeImportBinding | null;
+  namedBindingsNode: unknown | null;
+  namedBindings: AstNamedImportBinding[];
+  rewritable: boolean;
+};
+
+function addAstBindingNames(
+  node: unknown,
+  names: Set<string>,
+  typescript: TypeScriptAstApi,
+): void {
+  if (!node || typeof node !== "object") {
+    return;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  const kind = (node as { kind?: number }).kind;
+  if (kind === syntaxKind.Identifier) {
+    const name = astIdentifierText(node);
+    if (name) {
+      names.add(name);
+    }
+    return;
+  }
+
+  if (
+    kind !== syntaxKind.ObjectBindingPattern &&
+    kind !== syntaxKind.ArrayBindingPattern
+  ) {
+    return;
+  }
+  const elements = (node as { elements?: unknown[] }).elements;
+  for (const element of elements ?? []) {
+    addAstBindingNames(
+      (element as { name?: unknown } | null)?.name,
+      names,
+      typescript,
+    );
+  }
+}
+
+function addAstStatementValueBindings(
+  statement: unknown,
+  names: Set<string>,
+  typescript: TypeScriptAstApi,
+): void {
+  if (!statement || typeof statement !== "object") {
+    return;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  const kind = (statement as { kind?: number }).kind;
+  if (kind === syntaxKind.VariableStatement) {
+    const declarations =
+      (statement as { declarationList?: { declarations?: unknown[] } })
+        .declarationList?.declarations;
+    for (const declaration of declarations ?? []) {
+      addAstBindingNames(
+        (declaration as { name?: unknown }).name,
+        names,
+        typescript,
+      );
+    }
+    return;
+  }
+
+  if (
+    kind === syntaxKind.FunctionDeclaration ||
+    kind === syntaxKind.ClassDeclaration ||
+    kind === syntaxKind.EnumDeclaration ||
+    kind === syntaxKind.ModuleDeclaration
+  ) {
+    addAstBindingNames(
+      (statement as { name?: unknown }).name,
+      names,
+      typescript,
+    );
+  }
+}
+
+function astValueScopeBindings(
+  node: unknown,
+  typescript: TypeScriptAstApi,
+): Set<string> | null {
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  const kind = (node as { kind?: number }).kind;
+  const names = new Set<string>();
+
+  if (
+    kind === syntaxKind.FunctionDeclaration ||
+    kind === syntaxKind.FunctionExpression ||
+    kind === syntaxKind.ArrowFunction ||
+    kind === syntaxKind.MethodDeclaration ||
+    kind === syntaxKind.GetAccessor ||
+    kind === syntaxKind.SetAccessor ||
+    kind === syntaxKind.Constructor
+  ) {
+    const functionNode = node as {
+      name?: unknown;
+      parameters?: unknown[];
+    };
+    addAstBindingNames(functionNode.name, names, typescript);
+    for (const parameter of functionNode.parameters ?? []) {
+      addAstBindingNames(
+        (parameter as { name?: unknown }).name,
+        names,
+        typescript,
+      );
+    }
+    return names;
+  }
+
+  if (
+    kind === syntaxKind.Block ||
+    kind === syntaxKind.ModuleBlock ||
+    kind === syntaxKind.ClassStaticBlockDeclaration
+  ) {
+    for (
+      const statement of (node as { statements?: unknown[] }).statements ??
+        []
+    ) {
+      addAstStatementValueBindings(statement, names, typescript);
+    }
+    return names;
+  }
+
+  if (kind === syntaxKind.CaseBlock) {
+    for (const clause of (node as { clauses?: unknown[] }).clauses ?? []) {
+      for (
+        const statement of (clause as { statements?: unknown[] }).statements ??
+          []
+      ) {
+        addAstStatementValueBindings(statement, names, typescript);
+      }
+    }
+    return names;
+  }
+
+  if (kind === syntaxKind.CatchClause) {
+    addAstBindingNames(
+      (node as { variableDeclaration?: { name?: unknown } })
+        .variableDeclaration?.name,
+      names,
+      typescript,
+    );
+    return names;
+  }
+
+  if (
+    kind === syntaxKind.ForStatement ||
+    kind === syntaxKind.ForInStatement ||
+    kind === syntaxKind.ForOfStatement
+  ) {
+    const initializer = (node as { initializer?: unknown }).initializer as {
+      kind?: number;
+      declarations?: unknown[];
+    } | undefined;
+    if (initializer?.kind === syntaxKind.VariableDeclarationList) {
+      for (const declaration of initializer.declarations ?? []) {
+        addAstBindingNames(
+          (declaration as { name?: unknown }).name,
+          names,
+          typescript,
+        );
+      }
+    }
+    return names;
+  }
+
+  if (
+    kind === syntaxKind.ClassDeclaration ||
+    kind === syntaxKind.ClassExpression
+  ) {
+    addAstBindingNames(
+      (node as { name?: unknown }).name,
+      names,
+      typescript,
+    );
+    return names;
+  }
+
+  return null;
+}
+
+function astIdentifierIsReference(
+  node: unknown,
+  typescript: TypeScriptAstApi,
+): boolean {
+  if (!node || typeof node !== "object") {
+    return false;
+  }
+  const parent = (node as { parent?: unknown }).parent;
+  if (!parent || typeof parent !== "object") {
+    return false;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  const kind = (parent as { kind?: number }).kind;
+  const namedParent = parent as { name?: unknown };
+
+  if (kind === syntaxKind.ShorthandPropertyAssignment) {
+    return namedParent.name === node;
+  }
+
+  if (kind === syntaxKind.BindingElement) {
+    const bindingElement = parent as {
+      name?: unknown;
+      propertyName?: unknown;
+    };
+    return bindingElement.name !== node && bindingElement.propertyName !== node;
+  }
+
+  if (kind === syntaxKind.ExportSpecifier) {
+    const exportSpecifier = parent as {
+      name?: unknown;
+      propertyName?: unknown;
+      parent?: { parent?: { moduleSpecifier?: unknown } };
+    };
+    if (exportSpecifier.parent?.parent?.moduleSpecifier) {
+      return false;
+    }
+    return exportSpecifier.propertyName
+      ? exportSpecifier.propertyName === node
+      : exportSpecifier.name === node;
+  }
+
+  if (
+    (kind === syntaxKind.PropertyAccessExpression &&
+      namedParent.name === node) ||
+    (kind === syntaxKind.QualifiedName &&
+      (parent as { right?: unknown }).right === node) ||
+    (kind === syntaxKind.PropertyAssignment && namedParent.name === node) ||
+    (kind === syntaxKind.PropertyDeclaration && namedParent.name === node) ||
+    (kind === syntaxKind.PropertySignature && namedParent.name === node) ||
+    (kind === syntaxKind.MethodDeclaration && namedParent.name === node) ||
+    (kind === syntaxKind.MethodSignature && namedParent.name === node) ||
+    (kind === syntaxKind.GetAccessor && namedParent.name === node) ||
+    (kind === syntaxKind.SetAccessor && namedParent.name === node) ||
+    (kind === syntaxKind.EnumMember && namedParent.name === node) ||
+    (kind === syntaxKind.NamedTupleMember && namedParent.name === node) ||
+    (kind === syntaxKind.JsxAttribute && namedParent.name === node) ||
+    (kind === syntaxKind.MetaProperty && namedParent.name === node) ||
+    (kind === syntaxKind.TypePredicate &&
+      (parent as { parameterName?: unknown }).parameterName === node) ||
+    (kind === syntaxKind.LabeledStatement &&
+      (parent as { label?: unknown }).label === node) ||
+    (kind === syntaxKind.BreakStatement &&
+      (parent as { label?: unknown }).label === node) ||
+    (kind === syntaxKind.ContinueStatement &&
+      (parent as { label?: unknown }).label === node)
+  ) {
+    return false;
+  }
+
+  if (
+    kind === syntaxKind.VariableDeclaration ||
+    kind === syntaxKind.Parameter ||
+    kind === syntaxKind.FunctionDeclaration ||
+    kind === syntaxKind.FunctionExpression ||
+    kind === syntaxKind.ClassDeclaration ||
+    kind === syntaxKind.ClassExpression ||
+    kind === syntaxKind.InterfaceDeclaration ||
+    kind === syntaxKind.TypeAliasDeclaration ||
+    kind === syntaxKind.EnumDeclaration ||
+    kind === syntaxKind.ModuleDeclaration ||
+    kind === syntaxKind.TypeParameter ||
+    kind === syntaxKind.ImportEqualsDeclaration
+  ) {
+    return namedParent.name !== node;
+  }
+
+  return true;
+}
+
+function astIdentifierIsRuntimeReference(
+  node: unknown,
+  typescript: TypeScriptAstApi,
+): boolean {
+  if (!astIdentifierIsReference(node, typescript)) {
+    return false;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  let current = (node as { parent?: unknown }).parent;
+  while (current && typeof current === "object") {
+    const kind = (current as { kind?: number }).kind;
+    if (
+      (kind === syntaxKind.ExportSpecifier ||
+        kind === syntaxKind.ExportDeclaration) &&
+      (current as { isTypeOnly?: unknown }).isTypeOnly === true
+    ) {
+      return false;
+    }
+    if (
+      kind === syntaxKind.InterfaceDeclaration ||
+      kind === syntaxKind.TypeAliasDeclaration ||
+      (kind === syntaxKind.HeritageClause &&
+        (current as { token?: unknown }).token ===
+          syntaxKind.ImplementsKeyword)
+    ) {
+      return false;
+    }
+    if (
+      typeof kind === "number" &&
+      kind >= syntaxKind.FirstTypeNode &&
+      kind <= syntaxKind.LastTypeNode
+    ) {
+      return false;
+    }
+    current = (current as { parent?: unknown }).parent;
+  }
+  return true;
+}
+
+/** Collects root runtime identifiers referenced by a module or expression. */
+export function collectRuntimeIdentifierReferences(
+  options: CollectRuntimeIdentifierReferencesOptions,
+): Set<string> | null {
+  const typescript = options.typescript;
+  if (!typescript) {
+    return null;
+  }
+
+  let sourceFile: Record<string, unknown>;
+  try {
+    sourceFile = createSourceFile(typescript, options.code, options.id);
+  } catch {
+    return null;
+  }
+  const parseDiagnostics = sourceFile.parseDiagnostics;
+  if (Array.isArray(parseDiagnostics) && parseDiagnostics.length > 0) {
+    return null;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  const references = new Set<string>();
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== "object") {
+      return;
+    }
+    const kind = (node as { kind?: number }).kind;
+    if (kind === syntaxKind.ImportDeclaration) {
+      return;
+    }
+    if (kind === syntaxKind.Identifier) {
+      const name = astIdentifierText(node);
+      if (name && astIdentifierIsRuntimeReference(node, typescript)) {
+        references.add(name);
+      }
+    }
+    typescript.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return references;
+}
+
+/**
+ * Returns replacements that remove explicitly allowed import bindings with no
+ * runtime AST references. Null means the source could not be checked safely.
+ */
+export function collectUnusedRuntimeImportReplacements(
+  options: CollectUnusedRuntimeImportReplacementsOptions,
+): AstSourceReplacement[] | null {
+  const typescript = options.typescript;
+  const removableIdentifiers = options.removableIdentifiers;
+  if (
+    !typescript ||
+    !removableIdentifiers ||
+    typeof removableIdentifiers.has !== "function"
+  ) {
+    return null;
+  }
+  if (removableIdentifiers.size === 0) {
+    return [];
+  }
+
+  let sourceFile: Record<string, unknown>;
+  try {
+    sourceFile = createSourceFile(typescript, options.code, options.id);
+  } catch {
+    return null;
+  }
+  const parseDiagnostics = sourceFile.parseDiagnostics;
+  if (Array.isArray(parseDiagnostics) && parseDiagnostics.length > 0) {
+    return null;
+  }
+  const statements = sourceFile.statements;
+  if (!Array.isArray(statements)) {
+    return null;
+  }
+
+  const syntaxKind = typescript.SyntaxKind;
+  const plans: AstRuntimeImportPlan[] = [];
+  const runtimeBindingCounts = new Map<string, number>();
+  const registerRuntimeBinding = (binding: AstRuntimeImportBinding): void => {
+    if (!removableIdentifiers.has(binding.localName)) {
+      return;
+    }
+    runtimeBindingCounts.set(
+      binding.localName,
+      (runtimeBindingCounts.get(binding.localName) ?? 0) + 1,
+    );
+  };
+
+  for (const statement of statements) {
+    if (
+      !statement ||
+      typeof statement !== "object" ||
+      (statement as { kind?: number }).kind !== syntaxKind.ImportDeclaration
+    ) {
+      continue;
+    }
+    const importNode = statement as {
+      importClause?: unknown;
+      moduleSpecifier?: unknown;
+    };
+    const clause = importNode.importClause as {
+      isTypeOnly?: boolean;
+      name?: unknown;
+      namedBindings?: unknown;
+    } | undefined;
+    if (!clause || clause.isTypeOnly === true || !importNode.moduleSpecifier) {
+      continue;
+    }
+    const moduleSource = astStringLiteralText(importNode.moduleSpecifier);
+    if (moduleSource === null) {
+      continue;
+    }
+
+    let rewritable = true;
+    let defaultBinding: AstRuntimeImportBinding | null = null;
+    if (clause.name) {
+      const localName = astIdentifierText(clause.name);
+      if (!localName) {
+        rewritable = false;
+      } else {
+        defaultBinding = { localName, node: clause.name };
+        registerRuntimeBinding(defaultBinding);
+      }
+    }
+
+    let namespaceBinding: AstRuntimeImportBinding | null = null;
+    let namedBindingsNode: unknown | null = null;
+    const namedBindings: AstNamedImportBinding[] = [];
+    const bindingsNode = clause.namedBindings as {
+      kind?: number;
+      name?: unknown;
+      elements?: unknown[];
+    } | undefined;
+    if (bindingsNode?.kind === syntaxKind.NamespaceImport) {
+      const localName = astIdentifierText(bindingsNode.name);
+      if (!localName) {
+        rewritable = false;
+      } else {
+        namespaceBinding = { localName, node: bindingsNode };
+        registerRuntimeBinding(namespaceBinding);
+      }
+    } else if (bindingsNode?.kind === syntaxKind.NamedImports) {
+      namedBindingsNode = bindingsNode;
+      for (const element of bindingsNode.elements ?? []) {
+        const localName = astIdentifierText(
+          (element as { name?: unknown }).name,
+        );
+        if (!localName) {
+          rewritable = false;
+          continue;
+        }
+        const binding = {
+          localName,
+          node: element,
+          typeOnly: isTypeOnlyNode(element),
+        };
+        namedBindings.push(binding);
+        if (!binding.typeOnly) {
+          registerRuntimeBinding(binding);
+        }
+      }
+    } else if (bindingsNode) {
+      rewritable = false;
+    }
+
+    const statementStart = astNodeStart(statement, sourceFile);
+    const clauseStart = astNodeStart(clause, sourceFile);
+    const moduleStart = astNodeStart(importNode.moduleSpecifier, sourceFile);
+    const statementEnd = astNodeEnd(statement);
+    if (
+      statementStart < 0 ||
+      clauseStart < statementStart ||
+      moduleStart < clauseStart ||
+      statementEnd < moduleStart ||
+      options.code.slice(statementStart, clauseStart).trim() !== "import"
+    ) {
+      rewritable = false;
+    }
+    const bindingSource = options.code.slice(clauseStart, moduleStart);
+    if (bindingSource.includes("//") || bindingSource.includes("/*")) {
+      rewritable = false;
+    }
+
+    plans.push({
+      statement,
+      clause,
+      moduleSpecifier: importNode.moduleSpecifier,
+      moduleSource,
+      defaultBinding,
+      namespaceBinding,
+      namedBindingsNode,
+      namedBindings,
+      rewritable,
+    });
+  }
+
+  if (runtimeBindingCounts.size === 0) {
+    return [];
+  }
+
+  const runtimeNames = new Set(runtimeBindingCounts.keys());
+  const referenced = new Set<string>();
+  for (const [name, count] of runtimeBindingCounts) {
+    if (count > 1) {
+      referenced.add(name);
+    }
+  }
+
+  const visitReferences = (
+    node: unknown,
+    shadowed: ReadonlySet<string>,
+  ): void => {
+    if (!node || typeof node !== "object") {
+      return;
+    }
+    const kind = (node as { kind?: number }).kind;
+    if (kind === syntaxKind.ImportDeclaration) {
+      return;
+    }
+
+    let activeShadowed = shadowed;
+    if (node !== sourceFile) {
+      const scopeBindings = astValueScopeBindings(node, typescript);
+      if (scopeBindings?.size) {
+        for (const name of scopeBindings) {
+          if (!runtimeNames.has(name) || activeShadowed.has(name)) {
+            continue;
+          }
+          if (activeShadowed === shadowed) {
+            activeShadowed = new Set(shadowed);
+          }
+          (activeShadowed as Set<string>).add(name);
+        }
+      }
+    }
+
+    if (kind === syntaxKind.Identifier) {
+      const name = astIdentifierText(node);
+      if (
+        name &&
+        runtimeNames.has(name) &&
+        !activeShadowed.has(name) &&
+        astIdentifierIsRuntimeReference(node, typescript)
+      ) {
+        referenced.add(name);
+      }
+    }
+    typescript.forEachChild(
+      node,
+      (child) => visitReferences(child, activeShadowed),
+    );
+  };
+  visitReferences(sourceFile, new Set());
+
+  const replacements: AstSourceReplacement[] = [];
+  for (const plan of plans) {
+    if (!plan.rewritable) {
+      continue;
+    }
+    const keepDefault = plan.defaultBinding !== null &&
+      (!removableIdentifiers.has(plan.defaultBinding.localName) ||
+        referenced.has(plan.defaultBinding.localName));
+    const keepNamespace = plan.namespaceBinding !== null &&
+      (!removableIdentifiers.has(plan.namespaceBinding.localName) ||
+        referenced.has(plan.namespaceBinding.localName));
+    const keptNamedBindings = plan.namedBindings.filter((binding) =>
+      binding.typeOnly ||
+      !removableIdentifiers.has(binding.localName) ||
+      referenced.has(binding.localName)
+    );
+    const removedRuntimeBinding =
+      (plan.defaultBinding !== null && !keepDefault) ||
+      (plan.namespaceBinding !== null && !keepNamespace) ||
+      keptNamedBindings.length !== plan.namedBindings.length;
+    if (!removedRuntimeBinding) {
+      continue;
+    }
+
+    const statementStart = astNodeStart(plan.statement, sourceFile);
+    const statementEnd = astNodeEnd(plan.statement);
+    const keptParts: string[] = [];
+    if (keepDefault && plan.defaultBinding) {
+      keptParts.push(
+        astNodeText(plan.defaultBinding.node, options.code, sourceFile),
+      );
+    }
+    if (keepNamespace && plan.namespaceBinding) {
+      keptParts.push(
+        astNodeText(plan.namespaceBinding.node, options.code, sourceFile),
+      );
+    } else if (keptNamedBindings.length > 0 && plan.namedBindingsNode) {
+      keptParts.push(
+        `{ ${
+          keptNamedBindings.map((binding) =>
+            astNodeText(binding.node, options.code, sourceFile)
+          ).join(", ")
+        } }`,
+      );
+    }
+
+    if (keptParts.length === 0) {
+      const moduleStart = astNodeStart(plan.moduleSpecifier, sourceFile);
+      const moduleAndAttributes = options.code.slice(moduleStart, statementEnd);
+      replacements.push({
+        start: statementStart,
+        end: statementEnd,
+        replacement: options.sideEffectFreeSources?.has(plan.moduleSource)
+          ? ""
+          : `import ${moduleAndAttributes}`,
+      });
+      continue;
+    }
+
+    const moduleStart = astNodeStart(plan.moduleSpecifier, sourceFile);
+    const moduleAndAttributes = options.code.slice(moduleStart, statementEnd);
+    replacements.push({
+      start: statementStart,
+      end: statementEnd,
+      replacement: `import ${keptParts.join(", ")} from ${moduleAndAttributes}`,
+    });
+  }
+
+  return replacements;
+}
+
 function resolveScopeEntry(
   scopes: readonly Map<string, AstScopeEntry>[],
   name: string,
@@ -523,9 +1606,7 @@ function isInkObjectCall(
   return Boolean(
     isInkConstructorExpression(call.expression, scopes, typescript) &&
       Array.isArray(call.arguments) &&
-      call.arguments.length > 0 &&
-      (call.arguments[0] as { kind?: number } | undefined)?.kind ===
-        syntaxKind.ObjectLiteralExpression,
+      call.arguments.length > 0,
   );
 }
 

@@ -2,11 +2,13 @@ import {
   assert,
   assertEquals,
   assertMatch,
+  assertRejects,
   assertThrows,
 } from "jsr:@std/assert";
 import { dirname, join, toFileUrl } from "jsr:@std/path";
 import { twMerge } from "npm:tailwind-merge";
 import * as TypeScript from "npm:typescript";
+import { build as viteBuild } from "npm:vite@8.1.3";
 import { inkVite } from "./src/vite.ts";
 import { getNextThemeName, resolveManagedThemeEntries } from "./src/react.ts";
 import ink from "./src/runtime.ts";
@@ -44,13 +46,6 @@ const TAILWIND_RUNTIME_VIRTUAL_ID = "\0virtual:ink/tailwind-merge.js";
 const THEME_STORE_RUNTIME_VIRTUAL_ID = "\0virtual:ink/theme-store.js";
 const SVELTE_THEME_STORE_RUNTIME_VIRTUAL_ID =
   "\0virtual:ink/theme-store.svelte.ts";
-const MODULE_VIRTUAL_QUERY_KEY = "ink-module";
-
-function scopedVirtualId(moduleId: string): string {
-  return `${VIRTUAL_ID}?${MODULE_VIRTUAL_QUERY_KEY}=${
-    encodeURIComponent(moduleId)
-  }`;
-}
 
 const TEST_TYPESCRIPT = TypeScript as unknown as TypeScriptAstApi;
 const TEST_INK_IMPORT_SOURCES = ["@kraken/ink", "@jsr/kraken__ink"] as const;
@@ -415,7 +410,7 @@ Deno.test("svelte component CSS is extracted into virtual stylesheet", () => {
   );
 });
 
-Deno.test("svelte module CSS survives early shared virtual load ordering", () => {
+Deno.test("global Svelte CSS refreshes after early virtual load ordering", () => {
   const root = Deno.makeTempDirSync();
 
   try {
@@ -456,22 +451,262 @@ Deno.test("svelte module CSS survives early shared virtual load ordering", () =>
     );
 
     const code = transformed.code as string;
-    assert(code.includes(
-      `virtual:ink/styles.css?${MODULE_VIRTUAL_QUERY_KEY}=${
-        encodeURIComponent(componentId)
-      }`,
-    ));
+    assertEquals(
+      code.match(/virtual:ink\/styles\.css/g)?.length ?? 0,
+      1,
+    );
+    assert(!code.includes("ink-module="));
 
-    const scopedCss = load(scopedVirtualId(componentId));
-    assertEquals(typeof scopedCss, "string");
+    const globalCss = load(VIRTUAL_ID);
+    assertEquals(typeof globalCss, "string");
     assertMatch(
-      scopedCss as string,
+      globalCss as string,
       /\.ink_[a-z0-9]+\{container-name:card;container-type:inline-size\}/,
     );
     assertMatch(
-      scopedCss as string,
+      globalCss as string,
       /@container card \(width < 20rem\)\{\.ink_[a-z0-9]+\{text-align:left\}\}/,
     );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("build finalizes late component rules through one global CSS module", async () => {
+  const root = Deno.makeTempDirSync();
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+
+    let cssPostInput = "";
+    const viteCss = {
+      name: "vite:css",
+      transform(code: string) {
+        return { code: code.replace(/\s+/g, "") };
+      },
+    };
+    const viteCssPost = {
+      name: "vite:css-post",
+      transform(code: string) {
+        cssPostInput = code;
+        return null;
+      },
+    };
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const resolveId = asHook(plugin.resolveId);
+    const load = asHook(plugin.load);
+    const transform = asHook(plugin.transform);
+    const renderChunk = asHook(plugin.renderChunk);
+    const pluginContext = { warn() {} };
+
+    configResolved({
+      root,
+      command: "build",
+      plugins: [viteCss, viteCssPost],
+      resolve: { alias: [] },
+    });
+    const resolvedCssId = resolveId.call(
+      pluginContext,
+      "virtual:ink/styles.css",
+    );
+    assertEquals(resolvedCssId, VIRTUAL_ID);
+
+    const earlyCss = load(VIRTUAL_ID) as { code?: string };
+    assertEquals(earlyCss.code, ":root{--__ink-build-placeholder:0}");
+
+    for (
+      const [id, property, value] of [
+        [`${root}/src/route-a.ts`, "display", "grid"],
+        [`${root}/src/route-b.ts`, "color", "red"],
+      ] as const
+    ) {
+      const transformed = transform(
+        `import ink from "@kraken/ink";\n` +
+          `export const styles = ink({ base: { main: { ${property}: "${value}" } } });`,
+        id,
+      );
+      assert(
+        transformed && typeof transformed === "object" && "code" in transformed,
+      );
+      assertEquals(
+        ((transformed as { code: string }).code.match(
+          /virtual:ink\/styles\.css/g,
+        ) ?? []).length,
+        1,
+      );
+    }
+
+    await renderChunk.call(
+      pluginContext,
+      "",
+      { modules: { [VIRTUAL_ID]: {} } },
+      {},
+    );
+
+    assertMatch(cssPostInput, /\.ink_[a-z0-9]+\{display:grid\}/);
+    assertMatch(cssPostInput, /\.ink_[a-z0-9]+\{color:red\}/);
+    assertEquals((cssPostInput.match(/display:grid/g) ?? []).length, 1);
+    assertEquals((cssPostInput.match(/color:red/g) ?? []).length, 1);
+    assert(!cssPostInput.includes("__ink-build-placeholder"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("build fails when Vite CSS hooks cannot finalize the global stylesheet", async () => {
+  const root = Deno.makeTempDirSync();
+  try {
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const renderChunk = asHook(plugin.renderChunk);
+
+    configResolved({
+      root,
+      command: "build",
+      plugins: [],
+      resolve: { alias: [] },
+    });
+
+    await assertRejects(
+      async () => {
+        await renderChunk.call(
+          {},
+          "",
+          { modules: { [VIRTUAL_ID]: {} } },
+          {},
+        );
+      },
+      Error,
+      "could not finalize the global stylesheet because Vite's CSS plugins were unavailable",
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("Vite production build emits one global Ink stylesheet without the static runtime graph", async () => {
+  const root = Deno.makeTempDirSync({
+    dir: Deno.cwd(),
+    prefix: ".ink-vite-build-test-",
+  });
+  const outDir = `${root}/dist`;
+
+  const collectFiles = (directory: string): string[] => {
+    const files: string[] = [];
+    for (const entry of Deno.readDirSync(directory)) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory) {
+        files.push(...collectFiles(path));
+      } else if (entry.isFile) {
+        files.push(path);
+      }
+    }
+    return files;
+  };
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/theme-store.ts`,
+      `export const themeStore = {\n` +
+        `  state: "default",\n` +
+        `  subscribe(listener: (value: string) => void) {\n` +
+        `    listener(this.state);\n` +
+        `    return () => {};\n` +
+        `  },\n` +
+        `};\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { Theme } from "@kraken/ink";\n` +
+        `import { themeStore } from "./src/theme-store.ts";\n` +
+        `const palette = { marker: "INK_CONFIG_PALETTE_SENTINEL", bg: "black" };\n` +
+        `export default {\n` +
+        `  resolution: "static",\n` +
+        `  rootLayout: "./src/main.ts",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore,\n` +
+        `  themes: {\n` +
+        `    default: new Theme({ site: { bg: palette.bg } }),\n` +
+        `    dark: new Theme({ site: { bg: "white" } }),\n` +
+        `  },\n` +
+        `  breakpoints: { tablet: "48rem" },\n` +
+        `};\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/main.ts`,
+      `import ink, { tVar } from "@kraken/ink";\n` +
+        `const palette = { marker: "INK_PALETTE_SENTINEL", display: "grid" };\n` +
+        `const layout = ink({ base: { layout: { display: palette.display, color: tVar.site.bg } } });\n` +
+        `globalThis.__inkLayoutClass = layout.layout();\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/route.ts`,
+      `import ink from "@kraken/ink";\n` +
+        `const route = ink({ base: { route: { color: "red" } } });\n` +
+        `globalThis.__inkRouteClass = route.route();\n`,
+    );
+
+    await viteBuild({
+      root,
+      configFile: false,
+      logLevel: "silent",
+      plugins: [inkVite()],
+      resolve: {
+        alias: {
+          "@kraken/ink": join(Deno.cwd(), "src", "index.ts"),
+        },
+      },
+      build: {
+        outDir,
+        emptyOutDir: true,
+        cssCodeSplit: true,
+        minify: false,
+        target: "esnext",
+        rollupOptions: {
+          input: {
+            main: `${root}/src/main.ts`,
+            route: `${root}/src/route.ts`,
+          },
+          output: {
+            entryFileNames: "[name].js",
+            chunkFileNames: "chunks/[name].js",
+          },
+        },
+      },
+    });
+
+    const outputFiles = collectFiles(outDir);
+    const cssFiles = outputFiles.filter((path) => path.endsWith(".css"));
+    const jsFiles = outputFiles.filter((path) => path.endsWith(".js"));
+    assertEquals(cssFiles.length, 1, outputFiles.join("\n"));
+
+    const css = Deno.readTextFileSync(cssFiles[0]);
+    assertEquals((css.match(/display:grid/g) ?? []).length, 1, css);
+    assertEquals((css.match(/color:red/g) ?? []).length, 1, css);
+    assert(css.includes(":root{--site-bg:black}"), css);
+    assert(!css.includes("__ink-build-placeholder"), css);
+
+    const javascript = jsFiles.map((path) => Deno.readTextFileSync(path)).join(
+      "\n",
+    );
+    assert(!javascript.includes("INK_PALETTE_SENTINEL"), javascript);
+    assert(!javascript.includes("INK_CONFIG_PALETTE_SENTINEL"), javascript);
+    assert(!javascript.includes("compileAccessorFactory"), javascript);
+    assert(!javascript.includes("inkVite"), javascript);
+    assert(!javascript.includes("@kraken/ink"), javascript);
+    assert(!javascript.includes("new Theme"), javascript);
+    assert(!javascript.includes('"breakpoints"'), javascript);
+    assert(javascript.includes("data-ink-theme"), javascript);
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -535,9 +770,9 @@ Deno.test("statically evaluates mixed default and named ink imports in svelte as
     );
 
     const code = transformed.code as string;
-    assert(code.includes('import "virtual:ink/tailwind-merge";'));
-    assert(code.includes('"tailwindClassNames":["prose max-w-none"]'));
-    assert(code.includes('prose max-w-none"}'));
+    assert(!code.includes("virtual:ink/tailwind-merge"));
+    assert(!code.includes('"tailwindClassNames"'));
+    assert(code.includes("prose max-w-none"));
     assert(!code.includes("new ink("));
 
     const css = load(VIRTUAL_ID) as string;
@@ -658,15 +893,16 @@ Deno.test("injects virtual stylesheet import and extracts css for direct ink usa
   const code = transformed.code as string;
   assertMatch(
     code,
-    /^---\nimport "virtual:ink\/styles\.css";\nimport ink from "@kraken\/ink";/,
+    /^---\nimport "virtual:ink\/styles\.css";\n\nconst styles/,
   );
+  assert(!code.includes("@kraken/ink"));
 
   const loaded = load(VIRTUAL_ID);
   assertEquals(typeof loaded, "string");
   assertMatch(loaded as string, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
 });
 
-Deno.test("injects module-scoped virtual stylesheet imports for astro ink usage", () => {
+Deno.test("injects one global virtual stylesheet import for astro ink usage", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
   const load = asHook(plugin.load);
@@ -684,17 +920,15 @@ Deno.test("injects module-scoped virtual stylesheet imports for astro ink usage"
   );
 
   const code = transformed.code as string;
-  assert(
-    code.includes(
-      `virtual:ink/styles.css?${MODULE_VIRTUAL_QUERY_KEY}=${
-        encodeURIComponent(id)
-      }`,
-    ),
+  assertEquals(
+    code.match(/virtual:ink\/styles\.css/g)?.length ?? 0,
+    1,
   );
+  assert(!code.includes("ink-module="));
 
-  const scopedCss = load(scopedVirtualId(id));
-  assertEquals(typeof scopedCss, "string");
-  assertMatch(scopedCss as string, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
+  const globalCss = load(VIRTUAL_ID);
+  assertEquals(typeof globalCss, "string");
+  assertMatch(globalCss as string, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
 });
 
 Deno.test("injects virtual stylesheet import in astro files that only import ink styles", () => {
@@ -759,13 +993,19 @@ Deno.test("injects Svelte theme-store runtime in configured Svelte root layout",
 
   try {
     Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.mkdirSync(`${root}/src/lib`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/lib/theme.svelte.ts`,
+      `import { PersistedState } from "runed";\n` +
+        `export const themeMode = new PersistedState("themeMode", "default");\n`,
+    );
     Deno.writeTextFileSync(
       `${root}/ink.config.ts`,
       `import { defineInkConfig } from "@kraken/ink";\n` +
-        `import { PersistedState } from "runed";\n` +
-        `const themeMode = new PersistedState("themeMode", "default");\n` +
+        `import { themeMode } from "./src/lib/theme.svelte";\n` +
         `export default defineInkConfig({\n` +
         `  rootLayout: "./src/routes/+layout.svelte",\n` +
+        `  resolution: "static",\n` +
         `  themeMode: "store",\n` +
         `  themeStore: themeMode,\n` +
         `  themes: {\n` +
@@ -809,9 +1049,82 @@ Deno.test("injects Svelte theme-store runtime in configured Svelte root layout",
     assert(!css.includes('[data-ink-theme="light"]'));
 
     const runtime = load(SVELTE_THEME_STORE_RUNTIME_VIRTUAL_ID) as string;
-    assert(runtime.includes('import __inkConfig from "/ink.config.ts";'));
+    assert(
+      runtime.includes(
+        'import { themeMode as __inkThemeStoreBinding } from "/src/lib/theme.svelte.ts";',
+      ),
+    );
+    assert(!runtime.includes("/ink.config.ts"));
+    assert(runtime.includes('["default","dark"]'));
     assert(runtime.includes("$effect.root"));
     assert(runtime.includes("data-ink-theme"));
+
+    const component = transform(
+      `import ink from "@kraken/ink";\n` +
+        `const styles = ink({ base: { card: { display: "grid" } } });\n` +
+        `export const card = styles.card();\n`,
+      `${root}/src/lib/Card.ts`,
+    );
+    assert(
+      component && typeof component === "object" && "code" in component,
+    );
+    assert(!(component.code as string).includes("virtual:ink/theme-store"));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("injects a theme-store runtime fallback when rootLayout is omitted", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/src/theme-store.ts`,
+      `export const themeMode = { state: "default" };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `import { themeMode } from "./src/theme-store.ts";\n` +
+        `export default {\n` +
+        `  resolution: "static",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore: themeMode,\n` +
+        `  themes: {\n` +
+        `    default: { headerBG: "black" },\n` +
+        `    dark: { headerBG: "white" },\n` +
+        `  },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `import ink from "@kraken/ink";\n` +
+        `export const styles = ink({ base: { main: { display: "grid" } } });\n`,
+      `${root}/src/app.ts`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+    assert(
+      (transformed.code as string).includes(
+        'import "virtual:ink/theme-store";',
+      ),
+    );
+
+    const runtime = load(THEME_STORE_RUNTIME_VIRTUAL_ID) as string;
+    assert(
+      runtime.includes(
+        'import { themeMode as __inkThemeStoreBinding } from "/src/theme-store.ts";',
+      ),
+    );
+    assert(!runtime.includes("/ink.config.ts"));
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -974,6 +1287,76 @@ Deno.test("injects generic theme-store runtime in configured TSX root layout", a
   }
 });
 
+Deno.test("theme-store runtime does not subscribe while rendering on the server", async () => {
+  const root = Deno.makeTempDirSync();
+  const globals = globalThis as Record<string, any>;
+  const originalDocument = globals.document;
+  const originalConfig = globals.__ink_test_ssr_theme_config__;
+  const originalCleanup = globals.__ink_theme_store_cleanup__;
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `const themeStore = { state: "default", subscribe() { return () => {}; } };\n` +
+        `export default {\n` +
+        `  rootLayout: "./src/routes/root.tsx",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore,\n` +
+        `  themes: { default: { bg: "black" }, dark: { bg: "white" } },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const load = asHook(plugin.load);
+    configResolved({ root, resolve: { alias: [] } });
+
+    let subscriptions = 0;
+    globals.__ink_test_ssr_theme_config__ = {
+      themeStore: {
+        state: "default",
+        subscribe() {
+          subscriptions += 1;
+          return () => {};
+        },
+      },
+    };
+    delete globals.document;
+    delete globals.__ink_theme_store_cleanup__;
+
+    const runtime = (load(THEME_STORE_RUNTIME_VIRTUAL_ID) as string).replace(
+      'import __inkConfig from "/ink.config.ts";',
+      "const __inkConfig = globalThis.__ink_test_ssr_theme_config__;",
+    );
+    await import(
+      `data:text/javascript;charset=utf-8,${
+        encodeURIComponent(runtime)
+      }#${crypto.randomUUID()}`
+    );
+
+    assertEquals(subscriptions, 0);
+    assertEquals(globals.__ink_theme_store_cleanup__, undefined);
+  } finally {
+    if (originalDocument === undefined) {
+      delete globals.document;
+    } else {
+      globals.document = originalDocument;
+    }
+    if (originalConfig === undefined) {
+      delete globals.__ink_test_ssr_theme_config__;
+    } else {
+      globals.__ink_test_ssr_theme_config__ = originalConfig;
+    }
+    if (originalCleanup === undefined) {
+      delete globals.__ink_theme_store_cleanup__;
+    } else {
+      globals.__ink_theme_store_cleanup__ = originalCleanup;
+    }
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("rejects store theme config without a default theme", () => {
   const root = Deno.makeTempDirSync();
 
@@ -994,6 +1377,35 @@ Deno.test("rejects store theme config without a default theme", () => {
       () => configResolved({ root, resolve: { alias: [] } }),
       Error,
       'themeMode "store" requires themes.default',
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("static store themes require an independently importable store", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src/routes`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `const themeStore = { state: "default" };\n` +
+        `export default {\n` +
+        `  resolution: "static",\n` +
+        `  rootLayout: "./src/routes/+layout.ts",\n` +
+        `  themeMode: "store",\n` +
+        `  themeStore,\n` +
+        `  themes: { default: { bg: "black" } },\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    assertThrows(
+      () => configResolved({ root, resolve: { alias: [] } }),
+      Error,
+      'resolution="static" requires themeStore to be imported from a browser-safe module',
     );
   } finally {
     Deno.removeSync(root, { recursive: true });
@@ -1056,8 +1468,9 @@ Deno.test("injects virtual stylesheet import and extracts css for new ink() usag
   const code = transformed.code as string;
   assertMatch(
     code,
-    /^---\nimport "virtual:ink\/styles\.css";\nimport ink from "@kraken\/ink";/,
+    /^---\nimport "virtual:ink\/styles\.css";\n\nconst styles/,
   );
+  assert(!code.includes("@kraken/ink"));
   assert(!code.includes("new ink()"));
 
   const loaded = load(VIRTUAL_ID);
@@ -1087,9 +1500,11 @@ Deno.test("extracts Astro frontmatter aliases and ignores markup ink text", () =
 
   const code = transformed.code as string;
   assert(!code.includes("const styles = new css"));
-  assert(code.includes("const styles = css("));
+  assert(code.includes("const styles = (("));
+  assert(!code.includes("const styles = css("));
   assert(code.includes("<div>new ink({ base: { nope: {} } })</div>"));
-  assert(code.includes('"tailwindClassNames":["prose max-w-none"]'));
+  assert(!code.includes('"tailwindClassNames"'));
+  assert(code.includes("prose max-w-none"));
   assertEquals(load(VIRTUAL_ID), "");
 });
 
@@ -1197,7 +1612,7 @@ Deno.test("recognizes Astro transform ids with URL fragments", () => {
   }
 });
 
-Deno.test("module-scoped virtual CSS survives early shared virtual load ordering", () => {
+Deno.test("global virtual CSS includes modules discovered after an early load", () => {
   const plugin = inkVite();
   const transform = asHook(plugin.transform);
   const load = asHook(plugin.load);
@@ -1235,15 +1650,16 @@ Deno.test("module-scoped virtual CSS survives early shared virtual load ordering
   );
 
   const componentCode = transformedComponent.code as string;
-  assert(componentCode.includes(
-    `virtual:ink/styles.css?${MODULE_VIRTUAL_QUERY_KEY}=${
-      encodeURIComponent(componentId)
-    }`,
-  ));
+  assertEquals(
+    componentCode.match(/virtual:ink\/styles\.css/g)?.length ?? 0,
+    1,
+  );
+  assert(!componentCode.includes("ink-module="));
 
-  const scopedCss = load(scopedVirtualId(componentId));
-  assertEquals(typeof scopedCss, "string");
-  assertMatch(scopedCss as string, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
+  const globalCss = load(VIRTUAL_ID);
+  assertEquals(typeof globalCss, "string");
+  assert((globalCss as string).includes("body{color:white}"));
+  assertMatch(globalCss as string, /\.ink_[a-z0-9]+\{display:grid;gap:1rem\}/);
 });
 
 Deno.test("limits transforms to src/app by default", () => {
@@ -4864,11 +5280,188 @@ Deno.test("resolution=static extracts root vars from ink() config", () => {
     );
 
     const code = transformed.code as string;
-    assert(code.includes('"global":true'));
+    assert(!code.includes('"global":true'));
+    assert(!code.includes("ink("));
+    assert(!code.includes("@kraken/ink"));
+    assert(!code.includes('--blue":"#00aaff'));
 
     const css = load(VIRTUAL_ID) as string;
     assert(css.includes(":root{--blue:#00aaff}"));
     assertMatch(css, /\.ink_[a-z0-9]+\{color:var\(--blue\)\}/);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("resolution=static removes consumed declarations and Ink runtime imports", async () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static", breakpoints: { tablet: "48rem" } };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink, { Theme, tVar } from "@kraken/ink";\n` +
+      `import { untouched } from "./untouched.ts";\n` +
+      `const palette = { marker: "INK_PALETTE_SENTINEL", bg: "black" };\n` +
+      `const themes = { default: new Theme({ site: { bg: palette.bg } }) };\n` +
+      `const declaration = {\n` +
+      `  themes,\n` +
+      `  base: {\n` +
+      `    main: { color: tVar.site.bg, display: "grid" },\n` +
+      `    title: { fontWeight: 700 },\n` +
+      `  },\n` +
+      `  variant: { tone: { loud: { main: { color: "red" } } } },\n` +
+      `  defaults: { tone: "loud" },\n` +
+      `};\n` +
+      `export const styles = ink(declaration);\n` +
+      `export const keep = untouched;\n`;
+    assertEquals(
+      collectTestTargets(moduleCode, `${root}/src/app.ts`).calls.length,
+      1,
+    );
+    const transformed = await transform(moduleCode, `${root}/src/app.ts`);
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(!code.includes("@kraken/ink"), code);
+    assert(!code.includes("INK_PALETTE_SENTINEL"), code);
+    assert(!code.includes("new Theme"), code);
+    assert(!code.includes("tVar"), code);
+    assert(!code.includes("const declaration ="), code);
+    assert(!code.includes('"kind":"ink-style"'), code);
+    assert(!code.includes('"breakpoints"'), code);
+    assert(code.includes('from "./untouched.ts"'), code);
+    assert(code.includes("export const keep = untouched"), code);
+    assert(code.includes('import "virtual:ink/styles.css";'), code);
+
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes(":root{--site-bg:black}"), css);
+    assertMatch(css, /\.ink_[a-z0-9]+\{color:var\(--site-bg\);display:grid\}/);
+    assertMatch(css, /\.ink_[a-z0-9]+\{color:red\}/);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("static component cleanup preserves bindings referenced by markup", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/palette.ts`,
+      `export const palette = { red: "#f00" };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({ root, resolve: { alias: [] } });
+
+    const svelte = `<script lang="ts">\n` +
+      `import ink from "@kraken/ink";\n` +
+      `import { palette } from "./palette.ts";\n` +
+      `const declaration = { base: { main: { color: palette.red } } };\n` +
+      `const styles = ink(declaration);\n` +
+      `</script>\n` +
+      `<main class={styles.main()}>{palette.red}</main>`;
+    const transformedSvelte = transform(svelte, `${root}/src/App.svelte`);
+    assert(
+      transformedSvelte && typeof transformedSvelte === "object" &&
+        "code" in transformedSvelte,
+    );
+    const svelteCode = transformedSvelte.code as string;
+    assert(!svelteCode.includes("@kraken/ink"), svelteCode);
+    assert(!svelteCode.includes("const declaration"), svelteCode);
+    assert(svelteCode.includes(`{ palette } from "./palette.ts"`), svelteCode);
+    assert(svelteCode.includes("{palette.red}"), svelteCode);
+
+    const astro = `---\n` +
+      `import ink from "@kraken/ink";\n` +
+      `import { palette } from "./palette.ts";\n` +
+      `const declaration = { base: { main: { color: palette.red } } };\n` +
+      `const styles = ink(declaration);\n` +
+      `---\n` +
+      `<main class={styles.main()}>{palette.red}</main>`;
+    const transformedAstro = transform(astro, `${root}/src/App.astro`);
+    assert(
+      transformedAstro && typeof transformedAstro === "object" &&
+        "code" in transformedAstro,
+    );
+    const astroCode = transformedAstro.code as string;
+    assert(!astroCode.includes("@kraken/ink"), astroCode);
+    assert(!astroCode.includes("const declaration"), astroCode);
+    assert(astroCode.includes(`{ palette } from "./palette.ts"`), astroCode);
+    assert(astroCode.includes("{palette.red}"), astroCode);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("resolution=static removes resolver-evaluated local style helpers", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+    Deno.writeTextFileSync(
+      `${root}/src/utilities.ts`,
+      `export default {\n` +
+        `  gradientText: (value: string) => ({\n` +
+        `    background: value,\n` +
+        `    backgroundClip: "text",\n` +
+        `    color: "transparent",\n` +
+        `  }),\n` +
+        `};\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({ root, resolve: { alias: [] } });
+
+    const transformed = transform(
+      `import ink, { tVar } from "@kraken/ink";\n` +
+        `import Utilities from "./utilities.ts";\n` +
+        `const headerStyles = {\n` +
+        `  title: { "@apply": Utilities.gradientText(tVar.header.title) },\n` +
+        `};\n` +
+        `export const styles = ink({ base: { title: headerStyles.title } });\n`,
+      `${root}/src/styles.ts`,
+    );
+    assert(
+      transformed && typeof transformed === "object" && "code" in transformed,
+    );
+
+    const code = transformed.code as string;
+    assert(!code.includes("@kraken/ink"), code);
+    assert(!code.includes("Utilities"), code);
+    assert(!code.includes("headerStyles"), code);
+    assert(code.includes('import "./utilities.ts";'), code);
+    const css = load(VIRTUAL_ID) as string;
+    assertMatch(
+      css,
+      /\.ink_[a-z0-9]+\{background:var\(--header-title\);background-clip:text;color:transparent\}/,
+    );
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -4970,11 +5563,44 @@ Deno.test("resolution=static extracts root assignments from new ink()", () => {
     );
 
     const code = transformed.code as string;
-    assert(code.includes('"global":true'));
+    assert(!code.includes('"global":true'));
+    assert(!code.includes("new ink"));
+    assert(!code.includes('--blue":"#00aaff'));
 
     const css = load(VIRTUAL_ID) as string;
     assert(css.includes(":root{--blue:#00aaff}"));
     assertMatch(css, /\.ink_[a-z0-9]+\{color:var\(--blue\)\}/);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("resolution=static rejects reads between builder assignments", () => {
+  const root = Deno.makeTempDirSync();
+
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+
+    const plugin = inkVite();
+    const transform = asHook(plugin.transform);
+    const configResolved = asHook(plugin.configResolved);
+    configResolved({ root, resolve: { alias: [] } });
+
+    const moduleCode = `import ink from "@kraken/ink";\n` +
+      `const styles = new ink();\n` +
+      `styles.base = { main: { color: "red" } };\n` +
+      `export const first = styles.main();\n` +
+      `styles.base = { main: { color: "blue" } };\n`;
+
+    assertThrows(
+      () => transform(moduleCode, `${root}/src/interleaved.ts`),
+      Error,
+      "cannot fold styles because it is read before its final builder assignment",
+    );
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -5913,10 +6539,11 @@ Deno.test("loads ink.config.ts defaultUnit for numeric values mixed with tw() in
     assert(
       transformed && typeof transformed === "object" && "code" in transformed,
     );
-    assert((transformed.code as string).includes('"defaultUnit":"rem"'));
+    assert(!(transformed.code as string).includes('"defaultUnit":"rem"'));
+    assert((transformed.code as string).includes("margin:1rem"));
     assertMatch(
       transformed.code as string,
-      /"header":"ink_[a-z0-9]+ grid grid-cols-\[auto_1fr\] gap-4 m-4 border-4 rounded-lg"/,
+      /ink_[a-z0-9]+ grid grid-cols-\[auto_1fr\] gap-4 m-4 border-4 rounded-lg/,
     );
 
     const css = load(VIRTUAL_ID) as string;
@@ -7366,7 +7993,9 @@ Deno.test("new ink({ simple: true }) extracts tVar values passed through importe
 
     const code = transformed.code as string;
     assert(!code.includes(`new ink({ simple: true })`));
-    assert(code.includes(`"simple":true`));
+    assert(!code.includes("@kraken/ink"), code);
+    assert(!code.includes("Utilities"), code);
+    assert(code.includes("const content = (()=>"), code);
 
     const css = load(VIRTUAL_ID) as string;
     assertMatch(
@@ -8541,9 +9170,9 @@ Deno.test(
 
       const code = transformed.code as string;
       assert(!code.includes(`new ink({ simple: true })`));
-      assert(code.includes(`"simple":true`));
-      assert(code.includes(`"--content-background"`));
-      assert(code.includes(`"--content-text"`));
+      assert(code.includes(`simple=true`));
+      assert(code.includes(`background:var(--content-background)`));
+      assert(code.includes(`color:var(--content-text)`));
 
       const css = load(VIRTUAL_ID) as string;
       assert(css.includes(`background:var(--content-background)`));
@@ -9022,6 +9651,40 @@ Deno.test("vite compiles quoted variant selectors into runtime-managed variantGl
   assert(!css.includes("color-scheme:light"));
 });
 
+Deno.test("static resolution rejects runtime-selected variantGlobal rules", () => {
+  const root = Deno.makeTempDirSync();
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const transform = asHook(plugin.transform);
+    configResolved({ root, resolve: { alias: [] } });
+
+    assertThrows(
+      () =>
+        transform(
+          `import ink from "@kraken/ink";\n` +
+            `export const styles = ink({\n` +
+            `  base: { app: { display: "block" } },\n` +
+            `  variant: {\n` +
+            `    theme: { dark: { ":global(html)": { colorScheme: "dark" } } },\n` +
+            `  },\n` +
+            `  defaults: { theme: "dark" },\n` +
+            `});\n`,
+          `${root}/src/app.ts`,
+        ),
+      Error,
+      'resolution="static" cannot preserve runtime-selected variantGlobal rules',
+    );
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
 Deno.test("vite watches statically imported theme modules used by new ink()", () => {
   const root = Deno.makeTempDirSync();
   try {
@@ -9179,7 +9842,7 @@ Deno.test("vite invalidates style owner modules when imported theme files change
   }
 });
 
-Deno.test("vite hot updates return virtual CSS modules for managed style files", () => {
+Deno.test("vite hot updates defer aggregate CSS refresh until owners retransform", () => {
   const root = Deno.makeTempDirSync();
   try {
     const plugin = inkVite();
@@ -9197,7 +9860,6 @@ Deno.test("vite hot updates return virtual CSS modules for managed style files",
 
     const stylesModule = { id: stylesId };
     const globalCssModule = { id: VIRTUAL_ID };
-    const scopedCssModule = { id: scopedVirtualId(stylesId) };
     const invalidated: string[] = [];
 
     configResolved({ root, resolve: { alias: [] } });
@@ -9206,7 +9868,6 @@ Deno.test("vite hot updates return virtual CSS modules for managed style files",
         getModuleById: (id: string) => {
           if (id === stylesId) return stylesModule;
           if (id === VIRTUAL_ID) return globalCssModule;
-          if (id === scopedVirtualId(stylesId)) return scopedCssModule;
           return null;
         },
         getModulesByFile: (file: string) =>
@@ -9229,10 +9890,126 @@ Deno.test("vite hot updates return virtual CSS modules for managed style files",
       module.id
     );
     assert(affectedIds.includes(stylesId));
-    assert(affectedIds.includes(VIRTUAL_ID));
-    assert(affectedIds.includes(scopedVirtualId(stylesId)));
+    assert(!affectedIds.includes(VIRTUAL_ID));
     assert(invalidated.includes(VIRTUAL_ID));
-    assert(invalidated.includes(scopedVirtualId(stylesId)));
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite refreshes an already-loaded global stylesheet after lazy route discovery", async () => {
+  const root = Deno.makeTempDirSync();
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const configureServer = asHook(plugin.configureServer);
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const reloads: unknown[] = [];
+    const virtualModule = { id: VIRTUAL_ID };
+
+    configResolved({ root, command: "serve", resolve: { alias: [] } });
+    configureServer({
+      moduleGraph: {
+        getModuleById: (id: string) => id === VIRTUAL_ID ? virtualModule : null,
+        invalidateModule() {},
+      },
+      ws: {
+        send(payload: unknown) {
+          reloads.push(payload);
+        },
+      },
+    });
+
+    transform(
+      `import ink from "@kraken/ink";\n` +
+        `export const rootStyles = ink({ base: { root: { display: "block" } } });\n`,
+      `${root}/src/root.ts`,
+    );
+    load(VIRTUAL_ID);
+
+    transform(
+      `import ink from "@kraken/ink";\n` +
+        `export const routeStyles = ink({ base: { route: { color: "red" } } });\n`,
+      `${root}/src/lazy-route.ts`,
+    );
+    await Promise.resolve();
+
+    assertEquals(reloads, [{ type: "full-reload", path: "*" }]);
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes("display:block"), css);
+    assert(css.includes("color:red"), css);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+});
+
+Deno.test("vite refreshes aggregate CSS only after a hot owner retransform", async () => {
+  const root = Deno.makeTempDirSync();
+  try {
+    Deno.mkdirSync(`${root}/src`, { recursive: true });
+    Deno.writeTextFileSync(
+      `${root}/ink.config.ts`,
+      `export default { resolution: "static" };\n`,
+    );
+
+    const plugin = inkVite();
+    const configResolved = asHook(plugin.configResolved);
+    const configureServer = asHook(plugin.configureServer);
+    const transform = asHook(plugin.transform);
+    const load = asHook(plugin.load);
+    const handleHotUpdate = asHook(plugin.handleHotUpdate);
+    const stylesId = `${root}/src/styles.ts`;
+    const stylesModule = { id: stylesId };
+    const virtualModule = { id: VIRTUAL_ID };
+    const reloads: unknown[] = [];
+
+    configResolved({ root, command: "serve", resolve: { alias: [] } });
+    configureServer({
+      moduleGraph: {
+        getModuleById: (id: string) => {
+          if (id === stylesId) return stylesModule;
+          if (id === VIRTUAL_ID) return virtualModule;
+          return null;
+        },
+        getModulesByFile: (file: string) =>
+          file === stylesId ? new Set([stylesModule]) : undefined,
+        invalidateModule() {},
+      },
+      ws: {
+        send(payload: unknown) {
+          reloads.push(payload);
+        },
+      },
+    });
+
+    const source = (color: string) =>
+      `import ink from "@kraken/ink";\n` +
+      `export const styles = ink({ base: { main: { color: "${color}" } } });\n`;
+    transform(source("blue"), stylesId);
+    load(VIRTUAL_ID);
+
+    const affected = handleHotUpdate({ file: stylesId, timestamp: 123 });
+    assert(Array.isArray(affected));
+    assertEquals(
+      (affected as Array<{ id: string }>).map((module) => module.id),
+      [stylesId],
+    );
+    assertEquals(reloads, []);
+
+    transform(source("red"), stylesId);
+    await Promise.resolve();
+
+    assertEquals(reloads, [{ type: "full-reload", path: "*" }]);
+    const css = load(VIRTUAL_ID) as string;
+    assert(css.includes("color:red"), css);
+    assert(!css.includes("color:blue"), css);
   } finally {
     Deno.removeSync(root, { recursive: true });
   }
@@ -9470,7 +10247,7 @@ Deno.test("extracts css from CSS Module imported and resolved at build-time", as
       transformedCode.includes('"modules":{"myButton":"_myButton_1a2b3_1"}'),
     );
 
-    const css = load(scopedVirtualId(importerPath));
+    const css = load(VIRTUAL_ID);
     assertEquals(css, "");
     assert(transformedCode.includes('"button":"_myButton_1a2b3_1"'));
   } finally {
@@ -9531,7 +10308,7 @@ Deno.test("extracts css from CSS Module in simple builder style resolved at buil
       transformedCode.includes('"modules":{"myButton":"_myButton_simple"}'),
     );
 
-    const css = load(scopedVirtualId(importerPath));
+    const css = load(VIRTUAL_ID);
     assertEquals(css, "");
     assert(transformedCode.includes('"__ink_simple__":"_myButton_simple"'));
   } finally {

@@ -610,6 +610,9 @@ values if the app UI also needs the stored value normalized. This works with
 Svelte stores, React external-store style objects, TanStack stores, and Runed
 `PersistedState` in Svelte root layouts. Put the store in a browser-safe module
 and import that same singleton from both `ink.config.ts` and your app UI.
+With `resolution: "static"`, that separate importable module is required: Ink's
+theme bridge imports the store directly, while the config object, theme
+constructors, and palettes remain build-time-only.
 
 ```ts
 // src/lib/styles/theme.svelte.ts
@@ -701,9 +704,11 @@ the root variables or one of the partial override scopes.
 For React or TanStack Start, pass a subscribable store such as one with
 `subscribe` plus `getSnapshot`, `getState`, `get`, or `state`, export it from a
 shared module, and update it through that store's setter. Valid store values are
-`default` and the other keys in `themes`. Because the store bridge imports
-`ink.config.ts` in the client bundle, keep the store-backed config and its
-imports browser-safe.
+`default` and the other keys in `themes`. In static mode, the store bridge
+imports that shared store module directly, so the config, themes, and palettes
+remain build-time-only. A hybrid config with a locally embedded store can still
+load `ink.config.ts` in the browser; use a shared browser-safe store module to
+avoid that fallback.
 
 ### React theme helper
 
@@ -1139,12 +1144,21 @@ recommended API for anything non-trivial.
 
 - Static `ink({ ... })` calls and module-level `new ink()` assignments are
   extracted by the Vite plugin
-- Extracted rules are emitted through `virtual:ink/styles.css`
+- All extracted Ink rules are emitted once through the global
+  `virtual:ink/styles.css`; Ink does not also attach component copies to route
+  CSS chunks
 - Dynamic cases still work at runtime by injecting styles in the browser
-- `resolution: "static"` makes unresolved patterns fail the build instead of
-  falling back to runtime
+- `resolution: "static"` replaces resolved declarations with small class/style
+  accessors and removes their consumed Ink imports and build-time data. It also
+  makes unresolved patterns fail the build instead of falling back to runtime
 - `resolution: "hybrid"` is the default for non-Astro files
 - Astro defaults to static resolution unless you override it
+
+Static output does not retain Ink's serializer, resolver, theme constructors,
+project configuration, or original declarations. Runtime-selected variants keep
+only their generated accessor logic. Tailwind-aware variants may retain the
+small `tailwind-merge` helper, and `themeMode: "store"` retains the independent
+store bridge needed to update `data-ink-theme`.
 
 ## Build-time limits
 

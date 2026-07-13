@@ -27,6 +27,7 @@ import {
   Theme,
   ThemeAdvanced,
   type ThemeMode,
+  toCssDeclaration,
   toCssGlobalRules,
   toCssLayerOrderRule,
   toCssRules,
@@ -36,24 +37,34 @@ import {
 import {
   type AstNewInkDeclaration,
   type AstTransformTargets,
+  collectRuntimeIdentifierReferences,
   collectTransformTargets,
+  collectUnusedRuntimeImportReplacements,
+  extractInkConfigPropertyExpression,
   type ImportBinding,
   type ModuleStaticInfo,
   parseModuleStaticInfo,
 } from "./ast.js";
 import { compileInkModule } from "./ink-syntax.js";
+import {
+  generateStaticAccessorExpression,
+  type StaticAccessorModel,
+} from "./static-codegen.js";
 
 const PUBLIC_VIRTUAL_ID = "virtual:ink/styles.css";
 const RESOLVED_VIRTUAL_ID = "\0virtual:ink/styles.css";
 const PUBLIC_TAILWIND_RUNTIME_ID = "virtual:ink/tailwind-merge";
 const RESOLVED_TAILWIND_RUNTIME_ID = "\0virtual:ink/tailwind-merge.js";
+const PUBLIC_STATIC_TAILWIND_MERGE_ID = "virtual:ink/static-tailwind-merge";
+const RESOLVED_STATIC_TAILWIND_MERGE_ID =
+  "\0virtual:ink/static-tailwind-merge.js";
 const PUBLIC_THEME_STORE_RUNTIME_ID = "virtual:ink/theme-store";
 const RESOLVED_THEME_STORE_RUNTIME_ID = "\0virtual:ink/theme-store.js";
 const PUBLIC_SVELTE_THEME_STORE_RUNTIME_ID =
   "virtual:ink/theme-store.svelte.ts";
 const RESOLVED_SVELTE_THEME_STORE_RUNTIME_ID =
   "\0virtual:ink/theme-store.svelte.ts";
-const MODULE_VIRTUAL_QUERY_KEY = "ink-module";
+const BUILD_CSS_PLACEHOLDER = ":root{--__ink-build-placeholder:0}";
 const SIMPLE_STYLE_KEY = "__ink_simple__";
 const STATIC_STYLE_EXTENSIONS = [
   ".ts",
@@ -66,6 +77,7 @@ const STATIC_STYLE_EXTENSIONS = [
   ".cts",
   ".ink",
 ];
+const COMPOUND_SOURCE_SUFFIXES = new Set([".svelte", ".astro", ".vue"]);
 const IMAGE_ASSET_EXTENSIONS = new Set([
   ".apng",
   ".avif",
@@ -125,10 +137,18 @@ type ViteModuleGraphLike = {
 
 type ViteDevServerLike = {
   moduleGraph: ViteModuleGraphLike;
+  ws?: {
+    send: (payload: { type: "full-reload"; path?: string }) => void;
+  };
 };
 
 type ViteResolvedConfigLike = {
   root: string;
+  command?: "build" | "serve";
+  plugins?: Array<{
+    name?: string;
+    transform?: unknown;
+  }>;
   resolve: {
     alias?: unknown;
   };
@@ -152,6 +172,12 @@ type LoadedInkConfig = {
   imports: string[];
   themeMode: ThemeMode;
   hasThemeStore: boolean;
+  themeNames: string[];
+  themeStoreRuntimeImport: {
+    source: string;
+    binding: ImportBinding;
+    members: string[];
+  } | null;
   resolution: "static" | "dynamic" | "hybrid";
   hasExplicitResolution: boolean;
   debug: {
@@ -538,6 +564,10 @@ export {};
 `;
 }
 
+function loadStaticTailwindMergeRuntimeModule(): string {
+  return `export { twMerge as merge } from "tailwind-merge";\n`;
+}
+
 function loadThemeStoreRuntimeModule(
   inkConfig: LoadedInkConfig,
   viteRoot: string,
@@ -550,7 +580,32 @@ function loadThemeStoreRuntimeModule(
     return "export {};\n";
   }
 
-  const configImportPath = toBrowserModuleImportPath(inkConfig.path, viteRoot);
+  let themeStoreImport: string;
+  if (inkConfig.themeStoreRuntimeImport) {
+    const runtimeImport = inkConfig.themeStoreRuntimeImport;
+    const source = JSON.stringify(runtimeImport.source);
+    if (runtimeImport.binding.kind === "named") {
+      themeStoreImport =
+        `import { ${runtimeImport.binding.imported} as __inkThemeStoreBinding } from ${source};`;
+    } else if (runtimeImport.binding.kind === "namespace") {
+      themeStoreImport = `import * as __inkThemeStoreBinding from ${source};`;
+    } else {
+      themeStoreImport = `import __inkThemeStoreBinding from ${source};`;
+    }
+    const storeExpression = runtimeImport.members.reduce(
+      (expression, member) => `${expression}[${JSON.stringify(member)}]`,
+      "__inkThemeStoreBinding",
+    );
+    themeStoreImport += `\nconst __inkThemeStore = ${storeExpression};`;
+  } else {
+    const configImportPath = toBrowserModuleImportPath(
+      inkConfig.path,
+      viteRoot,
+    );
+    themeStoreImport = `import __inkConfig from ${
+      JSON.stringify(configImportPath)
+    };\nconst __inkThemeStore = __inkConfig?.themeStore;`;
+  }
   const runtimeKey = options.svelte
     ? "__ink_svelte_theme_store_cleanup__"
     : "__ink_theme_store_cleanup__";
@@ -566,16 +621,10 @@ if (!__inkCleanup && __inkThemeStore && typeof __inkThemeStore === "object" && "
 `
     : "";
 
-  return `import __inkConfig from ${JSON.stringify(configImportPath)};
+  return `${themeStoreImport}
 
 const __inkRuntimeKey = ${JSON.stringify(runtimeKey)};
-const __inkThemeStore = __inkConfig?.themeStore;
-const __inkThemes = __inkConfig?.themes;
-const __inkThemeNames = new Set(
-  __inkThemes && typeof __inkThemes === "object"
-    ? Object.keys(__inkThemes).map((name) => name.trim())
-    : ["default"],
-);
+const __inkThemeNames = new Set(${JSON.stringify(inkConfig.themeNames)});
 
 function __inkReadTheme(store) {
   if (!store) return undefined;
@@ -626,16 +675,19 @@ function __inkInstallThemeStore(store) {
   return () => __inkDispose(unsubscribe);
 }
 
-globalThis[__inkRuntimeKey]?.();
-let __inkCleanup = __inkInstallThemeStore(__inkThemeStore);
-${svelteCurrentBridge}
-globalThis[__inkRuntimeKey] = __inkCleanup ?? (() => {});
+let __inkCleanup;
+if (typeof document !== "undefined") {
+  globalThis[__inkRuntimeKey]?.();
+  __inkCleanup = __inkInstallThemeStore(__inkThemeStore);
+  ${svelteCurrentBridge}
+  globalThis[__inkRuntimeKey] = __inkCleanup ?? (() => {});
 
-if (import.meta.hot) {
-  import.meta.hot.dispose(() => {
-    globalThis[__inkRuntimeKey]?.();
-    delete globalThis[__inkRuntimeKey];
-  });
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      globalThis[__inkRuntimeKey]?.();
+      delete globalThis[__inkRuntimeKey];
+    });
+  }
 }
 
 export {};
@@ -721,6 +773,9 @@ const INK_IMPORT_SOURCES = [
   "@kraken/ink",
   "@jsr/kraken__ink",
 ] as const;
+const SIDE_EFFECT_FREE_STATIC_IMPORT_SOURCES = new Set<string>(
+  INK_IMPORT_SOURCES,
+);
 let staticInkDefaultExport: Record<string, unknown> | null = null;
 
 function isInkImportSource(source: string): boolean {
@@ -1058,6 +1113,39 @@ function addVirtualImportToModule(
   return addVirtualImport(code, importId);
 }
 
+function addImportStatementToModule(
+  code: string,
+  statement: string,
+  options: { isSvelte: boolean; isAstro: boolean },
+): string {
+  if (code.includes(statement)) {
+    return code;
+  }
+
+  if (options.isSvelte) {
+    const match = code.match(/<script\b[^>]*>/);
+    if (!match || match.index === undefined) {
+      return `<script>\n${statement}\n</script>\n${code}`;
+    }
+    const insertAt = match.index + match[0].length;
+    return code.slice(0, insertAt) + `\n${statement}` + code.slice(insertAt);
+  }
+
+  if (options.isAstro) {
+    const frontmatterMatch = code.match(/^---[ \t]*\r?\n/);
+    if (frontmatterMatch) {
+      const insertAt = frontmatterMatch[0].length;
+      return code.slice(0, insertAt) + `${statement}\n` +
+        code.slice(insertAt);
+    }
+    if (!isJsShapedAstroInput(code)) {
+      return `---\n${statement}\n---\n${code}`;
+    }
+  }
+
+  return `${statement}\n${code}`;
+}
+
 function addThemeStoreRuntimeImport(
   code: string,
   options: { isSvelte: boolean; isAstro: boolean },
@@ -1066,27 +1154,6 @@ function addThemeStoreRuntimeImport(
     ? PUBLIC_SVELTE_THEME_STORE_RUNTIME_ID
     : PUBLIC_THEME_STORE_RUNTIME_ID;
   return addVirtualImportToModule(code, options, importId);
-}
-
-function addModuleVirtualImportToAstro(code: string, importId: string): string {
-  if (code.includes(importId)) {
-    return code;
-  }
-
-  const frontmatterMatch = code.match(/^---[ \t]*\r?\n/);
-  if (!frontmatterMatch) {
-    return `${code}\nimport "${importId}";\n`;
-  }
-
-  const frontmatterBody = code.slice(frontmatterMatch[0].length);
-  const closeMatch = frontmatterBody.match(/\r?\n---[ \t]*(?:\r?\n|$)/);
-  if (!closeMatch || closeMatch.index === undefined) {
-    return `${code}\nimport "${importId}";\n`;
-  }
-
-  const insertAt = frontmatterMatch[0].length + closeMatch.index;
-  return code.slice(0, insertAt) + `\nimport "${importId}";` +
-    code.slice(insertAt);
 }
 
 function loadProjectSvelteCompiler(
@@ -1350,31 +1417,27 @@ function collectLegacyTransformTargetsFromRegions(
   return { calls, newInkDecls };
 }
 
-function moduleVirtualImportId(moduleId: string): string {
-  return `${PUBLIC_VIRTUAL_ID}?${MODULE_VIRTUAL_QUERY_KEY}=${
-    encodeURIComponent(moduleId)
-  }`;
-}
-
-function resolvedModuleVirtualId(moduleId: string): string {
-  return `${RESOLVED_VIRTUAL_ID}?${MODULE_VIRTUAL_QUERY_KEY}=${
-    encodeURIComponent(moduleId)
-  }`;
-}
-
-function readModuleVirtualImportId(id: string): string | null {
-  const queryIndex = id.indexOf("?");
-  if (queryIndex === -1) {
-    return null;
-  }
-
-  const params = new URLSearchParams(id.slice(queryIndex + 1));
-  const moduleId = params.get(MODULE_VIRTUAL_QUERY_KEY);
-  return moduleId && moduleId.length > 0 ? moduleId : null;
-}
-
 function mergeCss(rules: Iterable<string>): string {
   return Array.from(rules).join("\n");
+}
+
+function getTransformHookHandler(
+  plugin: { transform?: unknown } | undefined,
+): ((this: unknown, code: string, id: string) => unknown) | null {
+  const transform = plugin?.transform;
+  if (typeof transform === "function") {
+    return transform as (this: unknown, code: string, id: string) => unknown;
+  }
+  if (
+    transform && typeof transform === "object" &&
+    "handler" in transform &&
+    typeof (transform as { handler?: unknown }).handler === "function"
+  ) {
+    return (transform as {
+      handler: (this: unknown, code: string, id: string) => unknown;
+    }).handler;
+  }
+  return null;
 }
 
 function findFileUpwards(
@@ -1775,6 +1838,25 @@ function countIdentifierMentions(source: string, identifier: string): number {
   return count;
 }
 
+function collectIdentifierMentions(source: string): Set<string> {
+  const identifiers = new Set<string>();
+  const matcher = /[$A-Z_a-z][$\w]*/g;
+  for (let match = matcher.exec(source); match; match = matcher.exec(source)) {
+    identifiers.add(match[0]);
+  }
+  return identifiers;
+}
+
+function createGeneratedIdentifier(source: string, base: string): string {
+  let candidate = base;
+  let suffix = 2;
+  while (new RegExp(`\\b${escapeRegExp(candidate)}\\b`).test(source)) {
+    candidate = `${base}${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
 function containsIdentifierReference(value: unknown): boolean {
   if (!value || typeof value !== "object") {
     return false;
@@ -1796,6 +1878,36 @@ function containsIdentifierReference(value: unknown): boolean {
   return Object.values(value as Record<string, unknown>).some((entry) =>
     containsIdentifierReference(entry)
   );
+}
+
+function collectIdentifierReferenceHeads(
+  value: unknown,
+  identifiers: Set<string>,
+): void {
+  if (!value || typeof value !== "object") {
+    return;
+  }
+  if (
+    "kind" in value &&
+    (value as { kind?: unknown }).kind === "identifier-ref" &&
+    "path" in value &&
+    Array.isArray((value as { path?: unknown }).path)
+  ) {
+    const head = (value as { path: unknown[] }).path[0];
+    if (typeof head === "string") {
+      identifiers.add(head);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectIdentifierReferenceHeads(entry, identifiers);
+    }
+    return;
+  }
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    collectIdentifierReferenceHeads(entry, identifiers);
+  }
 }
 
 type StaticModuleResolver = {
@@ -2259,42 +2371,164 @@ function createStaticModuleResolver(options: {
   };
 }
 
-function stripUnusedStaticHelperConsts(code: string, id: string): string {
-  const moduleInfo = parseStaticModuleInfo(code, id);
-  const removals: Array<{ start: number; end: number }> = [];
-
-  for (const [name, info] of moduleInfo.constInitializers) {
-    if (info.exported) {
-      continue;
-    }
-
-    const parsedInitializer = parseStaticExpression(
-      info.initializer,
-      undefined,
-      { keepUnresolvedIdentifiers: true },
-    );
-    if (
-      parsedInitializer === null ||
-      !containsIdentifierReference(parsedInitializer)
-    ) {
-      continue;
-    }
-
-    if (countIdentifierMentions(code, name) <= 1) {
-      removals.push({ start: info.start, end: info.end });
-    }
-  }
-
-  if (removals.length === 0) {
-    return code;
-  }
-
-  removals.sort((a, b) => b.start - a.start);
+function stripUnusedStaticHelperConsts(
+  code: string,
+  id: string,
+  consumedIdentifiers?: ReadonlySet<string>,
+  protectedIdentifiers: ReadonlySet<string> = new Set(),
+): string {
   let nextCode = code;
-  for (const removal of removals) {
-    nextCode = nextCode.slice(0, removal.start) + nextCode.slice(removal.end);
+  const removableIdentifiers = consumedIdentifiers
+    ? new Set(consumedIdentifiers)
+    : null;
+  if (removableIdentifiers) {
+    for (const identifier of protectedIdentifiers) {
+      removableIdentifiers.delete(identifier);
+    }
+  }
+  while (true) {
+    const moduleInfo = parseStaticModuleInfo(nextCode, id);
+    const removals: Array<{ start: number; end: number }> = [];
+    const declarationSpanCounts = new Map<string, number>();
+    for (const info of moduleInfo.constInitializers.values()) {
+      const key = `${info.start}:${info.end}`;
+      declarationSpanCounts.set(key, (declarationSpanCounts.get(key) ?? 0) + 1);
+    }
+
+    for (const [name, info] of moduleInfo.constInitializers) {
+      if (info.exported) {
+        continue;
+      }
+
+      // parseModuleStaticInfo records the whole variable statement. Removing
+      // one declarator from a comma-separated statement would also remove its
+      // siblings, so leave those statements to normal tree-shaking.
+      if ((declarationSpanCounts.get(`${info.start}:${info.end}`) ?? 0) > 1) {
+        continue;
+      }
+
+      const parsedInitializer = parseStaticExpression(
+        info.initializer,
+        undefined,
+        { keepUnresolvedIdentifiers: true },
+      );
+      if (removableIdentifiers === null && parsedInitializer === null) {
+        continue;
+      }
+
+      const isRemovalCandidate = removableIdentifiers
+        ? removableIdentifiers.has(name)
+        : containsIdentifierReference(parsedInitializer!);
+      if (isRemovalCandidate && countIdentifierMentions(nextCode, name) <= 1) {
+        if (removableIdentifiers) {
+          const astReferences = collectRuntimeIdentifierReferences({
+            typescript: getTypeScriptAstApi(),
+            code: `const __inkStaticInitializer = (${info.initializer});`,
+            id,
+          });
+          if (astReferences) {
+            astReferences.delete("__inkStaticInitializer");
+            for (const reference of astReferences) {
+              if (!protectedIdentifiers.has(reference)) {
+                removableIdentifiers.add(reference);
+              }
+            }
+          } else {
+            const initializerReferences = new Set<string>();
+            collectIdentifierReferenceHeads(
+              parsedInitializer,
+              initializerReferences,
+            );
+            for (const reference of initializerReferences) {
+              if (!protectedIdentifiers.has(reference)) {
+                removableIdentifiers.add(reference);
+              }
+            }
+          }
+        }
+        removals.push({ start: info.start, end: info.end });
+      }
+    }
+
+    if (removals.length === 0) {
+      break;
+    }
+
+    removals.sort((a, b) => b.start - a.start);
+    for (const removal of removals) {
+      nextCode = nextCode.slice(0, removal.start) +
+        nextCode.slice(removal.end);
+    }
+  }
+
+  if (!removableIdentifiers || removableIdentifiers.size === 0) {
+    return nextCode;
+  }
+
+  const importReplacements = collectUnusedRuntimeImportReplacements({
+    typescript: getTypeScriptAstApi(),
+    code: nextCode,
+    id,
+    removableIdentifiers,
+    sideEffectFreeSources: SIDE_EFFECT_FREE_STATIC_IMPORT_SOURCES,
+  });
+  if (!importReplacements || importReplacements.length === 0) {
+    return nextCode;
+  }
+
+  importReplacements.sort((left, right) => right.start - left.start);
+  for (const replacement of importReplacements) {
+    nextCode = nextCode.slice(0, replacement.start) +
+      replacement.replacement + nextCode.slice(replacement.end);
   }
   return nextCode;
+}
+
+function collectStaticExpressionRuntimeIdentifiers(
+  source: string,
+  id: string,
+  identifiers: Set<string>,
+): void {
+  const references = collectRuntimeIdentifierReferences({
+    typescript: getTypeScriptAstApi(),
+    code: `const __inkStaticExpression = (${source});`,
+    id,
+  });
+  if (!references) {
+    return;
+  }
+  references.delete("__inkStaticExpression");
+  for (const reference of references) {
+    identifiers.add(reference);
+  }
+}
+
+function builderHasInterleavedRuntimeReference(
+  declaration: AstNewInkDeclaration,
+  source: string,
+  id: string,
+): boolean {
+  let previousEnd = declaration.initializerEnd;
+  const assignments = [...declaration.assignments].sort((left, right) =>
+    left.start - right.start
+  );
+  for (const assignment of assignments) {
+    const betweenAssignments = source.slice(previousEnd, assignment.start);
+    const references = collectRuntimeIdentifierReferences({
+      typescript: getTypeScriptAstApi(),
+      code: betweenAssignments,
+      id,
+    });
+    if (
+      references?.has(declaration.varName) ||
+      (references === null &&
+        identifierMentioned(betweenAssignments, declaration.varName))
+    ) {
+      return true;
+    }
+    previousEnd = assignment.end;
+  }
+  return false;
 }
 
 function hasStyleDeclarations(declaration: StyleDeclaration): boolean {
@@ -2336,6 +2570,124 @@ function resolveStyleClassValue(
   }
 
   return generatedClassName ?? "";
+}
+
+function isStaticInlineStyleValue(value: unknown): value is StyleValue {
+  if (
+    typeof value === "string" || typeof value === "number" ||
+    isCssVarRef(value) || isImageValue(value)
+  ) {
+    return true;
+  }
+  return Array.isArray(value) &&
+    value.every((entry) =>
+      typeof entry === "string" || typeof entry === "number" ||
+      isCssVarRef(entry) || isImageValue(entry)
+    );
+}
+
+function toStaticInlineDeclarationMap(
+  declaration: StyleDeclaration,
+  options: {
+    breakpoints?: Record<string, string>;
+    containers?: Record<string, { type?: string; rule: string }>;
+    defaultUnit?: string;
+  },
+): Record<string, string> {
+  const serialized: Record<string, string> = {};
+  for (const [name, value] of Object.entries(declaration)) {
+    if (name === "@apply" || !isStaticInlineStyleValue(value)) {
+      continue;
+    }
+    serialized[name] = toCssDeclaration(name, value, options);
+  }
+  return serialized;
+}
+
+function toStaticAccessorModel(
+  parsed: {
+    simple?: boolean;
+    base: NormalizedStyleSheet;
+    variant?: Record<string, Record<string, NormalizedStyleSheet>>;
+    defaults?: Record<string, string | boolean>;
+    modules?: Record<string, string>;
+  },
+  classMap: Record<string, string>,
+  variantClassMap: Record<
+    string,
+    Record<string, Partial<Record<string, string>>>
+  >,
+  options: {
+    breakpoints?: Record<string, string>;
+    containers?: Record<string, { type?: string; rule: string }>;
+    defaultUnit?: string;
+  },
+): StaticAccessorModel {
+  const inlineBase: NonNullable<StaticAccessorModel["inlineBase"]> = {};
+  for (const [key, style] of Object.entries(parsed.base)) {
+    inlineBase[key] = toStaticInlineDeclarationMap(
+      style.declaration,
+      options,
+    );
+  }
+
+  const inlineVariant: NonNullable<StaticAccessorModel["inlineVariant"]> = {};
+  const tailwindMergeVariant: NonNullable<
+    StaticAccessorModel["tailwindMergeVariant"]
+  > = {};
+  for (const [group, variants] of Object.entries(parsed.variant ?? {})) {
+    const inlineGroup: Record<
+      string,
+      Record<string, Record<string, string>>
+    > = {};
+    const tailwindGroup: Record<string, Record<string, boolean>> = {};
+    for (const [variantName, styles] of Object.entries(variants)) {
+      const inlineStyles: Record<string, Record<string, string>> = {};
+      const tailwindStyles: Record<string, boolean> = {};
+      for (const [key, style] of Object.entries(styles)) {
+        inlineStyles[key] = toStaticInlineDeclarationMap(
+          style.declaration,
+          options,
+        );
+        if (hasTailwindClassNames(style)) {
+          tailwindStyles[key] = true;
+        }
+      }
+      inlineGroup[variantName] = inlineStyles;
+      if (Object.keys(tailwindStyles).length > 0) {
+        tailwindGroup[variantName] = tailwindStyles;
+      }
+    }
+    inlineVariant[group] = inlineGroup;
+    if (Object.keys(tailwindGroup).length > 0) {
+      tailwindMergeVariant[group] = tailwindGroup;
+    }
+  }
+
+  return {
+    simple: parsed.simple,
+    base: classMap,
+    variant: variantClassMap as Record<
+      string,
+      Record<string, Record<string, string>>
+    >,
+    defaults: parsed.defaults,
+    modules: parsed.modules,
+    inlineBase,
+    inlineVariant,
+    tailwindMergeVariant,
+  };
+}
+
+function staticAccessorNeedsTailwindMerge(model: StaticAccessorModel): boolean {
+  for (const variants of Object.values(model.tailwindMergeVariant ?? {})) {
+    for (const styles of Object.values(variants)) {
+      if (Object.values(styles).some(Boolean)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function toRuntimeInkConfigLiteral(parsed: {
@@ -2420,6 +2772,8 @@ function loadInkConfig(
       imports: [],
       themeMode: "color-scheme",
       hasThemeStore: false,
+      themeNames: [],
+      themeStoreRuntimeImport: null,
       resolution: "hybrid",
       hasExplicitResolution: false,
       debug: {
@@ -2529,6 +2883,50 @@ function loadInkConfig(
     configObject,
     "themeStore",
   );
+  const themeNames = isRecord(configObject.themes)
+    ? Object.keys(configObject.themes)
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0)
+    : [];
+  let themeStoreRuntimeImport: LoadedInkConfig["themeStoreRuntimeImport"] =
+    null;
+  if (hasThemeStore && configModuleInfo) {
+    const propertyExpression = extractInkConfigPropertyExpression({
+      typescript: getTypeScriptAstApi(),
+      code: source,
+      id: configPath,
+      property: "themeStore",
+    });
+    const identifierPath = propertyExpression?.identifierPath;
+    if (identifierPath && identifierPath.length > 0) {
+      const binding = configModuleInfo.imports.get(identifierPath[0]);
+      if (binding) {
+        const resolvedImport = resolveImportToFile(
+          configPath,
+          binding.source,
+          resolverOptions,
+        );
+        themeStoreRuntimeImport = {
+          source: resolvedImport
+            ? toBrowserModuleImportPath(
+              resolvedImport,
+              resolverOptions.viteRoot,
+            )
+            : binding.source,
+          binding,
+          members: identifierPath.slice(1),
+        };
+      }
+    }
+  }
+  if (
+    resolution === "static" && themeMode === "store" && hasThemeStore &&
+    !themeStoreRuntimeImport
+  ) {
+    throw new Error(
+      '[ink] resolution="static" requires themeStore to be imported from a browser-safe module so the theme bridge can remain without bundling ink.config.',
+    );
+  }
   const debug = normalizeDebugOptions(configObject.debug);
   const breakpoints = normalizeBreakpoints(configObject.breakpoints);
   const breakpointBoundary = normalizeBreakpointBoundary(
@@ -2654,6 +3052,8 @@ function loadInkConfig(
     imports: allImports,
     themeMode,
     hasThemeStore,
+    themeNames,
+    themeStoreRuntimeImport,
     resolution,
     hasExplicitResolution,
     debug,
@@ -3277,12 +3677,16 @@ function evaluateFunctionDeclaration(
 
 function resolveFileFromBase(basePath: string): string | null {
   const candidates: string[] = [];
-  if (getNodePath().extname(basePath)) {
+  const explicitExtension = getNodePath().extname(basePath);
+  if (explicitExtension) {
     candidates.push(basePath);
-  } else {
+  }
+  if (!explicitExtension || COMPOUND_SOURCE_SUFFIXES.has(explicitExtension)) {
     for (const extension of STATIC_STYLE_EXTENSIONS) {
       candidates.push(`${basePath}${extension}`);
-      candidates.push(getNodePath().join(basePath, `index${extension}`));
+      if (!explicitExtension) {
+        candidates.push(getNodePath().join(basePath, `index${extension}`));
+      }
     }
   }
 
@@ -3889,12 +4293,20 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
   let projectRoot = process.cwd();
   let viteAliases: ViteAliasEntry[] = [];
   let tsconfigResolver: TsconfigPathResolver | null = null;
+  let isBuild = false;
+  let viteCssPlugin: { transform?: unknown } | undefined;
+  let viteCssPostPlugin: { transform?: unknown } | undefined;
+  let virtualCssResolveContext: unknown;
+  let devVirtualCssLoaded = false;
+  let devCssRefreshQueued = false;
   let inkConfig: LoadedInkConfig = {
     path: null,
     dependencies: [],
     imports: [],
     themeMode: "color-scheme",
     hasThemeStore: false,
+    themeNames: [],
+    themeStoreRuntimeImport: null,
     resolution: "hybrid",
     hasExplicitResolution: false,
     debug: {
@@ -3963,17 +4375,19 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
     return parts.filter((part) => part.length > 0).join("\n");
   }
 
-  function moduleScopedCss(moduleId: string): string {
-    const parts: string[] = [];
-    const imports = moduleImports.get(moduleId) ?? [];
-    for (const cssImport of imports) {
-      parts.push(`@import ${cssImport};`);
+  function queueDevCssRefresh(): void {
+    if (
+      isBuild || !devVirtualCssLoaded || devCssRefreshQueued ||
+      typeof server?.ws?.send !== "function"
+    ) {
+      return;
     }
-    const rules = moduleCss.get(moduleId);
-    if (rules && rules.length > 0) {
-      parts.push(rules);
-    }
-    return parts.join("\n");
+
+    devCssRefreshQueued = true;
+    queueMicrotask(() => {
+      devCssRefreshQueued = false;
+      server?.ws?.send({ type: "full-reload", path: "*" });
+    });
   }
 
   function updateModuleStaticDependencies(
@@ -4103,7 +4517,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
   }
 
   function invalidateVirtualModules(
-    moduleIds: Iterable<string> = [],
+    _moduleIds: Iterable<string> = [],
     timestamp?: number,
     invalidatedModules?: Set<unknown>,
   ): unknown[] {
@@ -4118,17 +4532,6 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       for (
         const module of invalidateModuleById(
           virtualId,
-          timestamp,
-          invalidatedModules,
-        )
-      ) {
-        invalidated.add(module);
-      }
-    }
-    for (const moduleId of moduleIds) {
-      for (
-        const module of invalidateModuleById(
-          resolvedModuleVirtualId(moduleId),
           timestamp,
           invalidatedModules,
         )
@@ -4161,15 +4564,11 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         invalidated.add(module);
       }
     }
-    for (
-      const module of invalidateVirtualModules(
-        normalizedIds,
-        timestamp,
-        invalidatedModules,
-      )
-    ) {
-      invalidated.add(module);
-    }
+    invalidateVirtualModules(
+      normalizedIds,
+      timestamp,
+      invalidatedModules,
+    );
     return Array.from(invalidated);
   }
 
@@ -4183,17 +4582,29 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
 
     configResolved(config: ViteResolvedConfigLike) {
       viteRoot = config.root;
+      isBuild = config.command === "build";
+      viteCssPlugin = config.plugins?.find((plugin) =>
+        plugin.name === "vite:css"
+      );
+      viteCssPostPlugin = config.plugins?.find((plugin) =>
+        plugin.name === "vite:css-post"
+      );
       viteAliases = normalizeViteAliases(config.resolve.alias);
       initializeResolvers(viteRoot);
     },
 
     resolveId(id: string, importer?: string) {
       if (cleanId(id) === PUBLIC_VIRTUAL_ID) {
-        const suffix = id.slice(PUBLIC_VIRTUAL_ID.length);
-        return `${RESOLVED_VIRTUAL_ID}${suffix}`;
+        if (isBuild) {
+          virtualCssResolveContext = this;
+        }
+        return RESOLVED_VIRTUAL_ID;
       }
       if (cleanId(id) === PUBLIC_TAILWIND_RUNTIME_ID) {
         return RESOLVED_TAILWIND_RUNTIME_ID;
+      }
+      if (cleanId(id) === PUBLIC_STATIC_TAILWIND_MERGE_ID) {
+        return RESOLVED_STATIC_TAILWIND_MERGE_ID;
       }
       if (cleanId(id) === PUBLIC_THEME_STORE_RUNTIME_ID) {
         return RESOLVED_THEME_STORE_RUNTIME_ID;
@@ -4210,14 +4621,21 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
 
     load(id: string) {
       if (cleanId(id) === RESOLVED_VIRTUAL_ID) {
-        const moduleId = readModuleVirtualImportId(id);
-        if (moduleId) {
-          return moduleScopedCss(moduleId);
+        if (isBuild) {
+          return {
+            code: BUILD_CSS_PLACEHOLDER,
+            map: null,
+            moduleSideEffects: true,
+          };
         }
+        devVirtualCssLoaded = true;
         return combinedCss();
       }
       if (cleanId(id) === RESOLVED_TAILWIND_RUNTIME_ID) {
         return loadTailwindRuntimeModule();
+      }
+      if (cleanId(id) === RESOLVED_STATIC_TAILWIND_MERGE_ID) {
+        return loadStaticTailwindMergeRuntimeModule();
       }
       if (cleanId(id) === RESOLVED_THEME_STORE_RUNTIME_ID) {
         return loadThemeStoreRuntimeModule(inkConfig, viteRoot, {
@@ -4229,6 +4647,58 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           svelte: true,
         });
       }
+      return null;
+    },
+
+    async renderChunk(
+      this: { warn?: (message: string) => void },
+      _code: string,
+      chunk: { modules?: Record<string, unknown> },
+    ) {
+      if (!isBuild) {
+        return null;
+      }
+
+      const virtualModuleId = Object.keys(chunk.modules ?? {}).find((id) =>
+        cleanId(id) === RESOLVED_VIRTUAL_ID
+      );
+      if (!virtualModuleId) {
+        return null;
+      }
+
+      const cssTransform = getTransformHookHandler(viteCssPlugin);
+      const cssPostTransform = getTransformHookHandler(viteCssPostPlugin);
+      if (!cssTransform || !cssPostTransform) {
+        throw new Error(
+          "[ink] could not finalize the global stylesheet because Vite's CSS plugins were unavailable.",
+        );
+      }
+
+      const transformed = await cssTransform.call(
+        virtualCssResolveContext ?? this,
+        combinedCss(),
+        virtualModuleId,
+      );
+      let css = combinedCss();
+      if (typeof transformed === "string") {
+        css = transformed;
+      } else if (
+        transformed && typeof transformed === "object" &&
+        "code" in transformed
+      ) {
+        const transformedCode = (transformed as { code?: unknown }).code;
+        if (typeof transformedCode === "string") {
+          css = transformedCode;
+        } else if (transformedCode !== undefined && transformedCode !== null) {
+          css = String(transformedCode);
+        }
+      }
+
+      await cssPostTransform.call(
+        this,
+        css.replace(/[\n\r]/g, ""),
+        virtualModuleId,
+      );
       return null;
     },
 
@@ -4298,8 +4768,13 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
       });
 
       if (calls.length === 0 && newInkDecls.length === 0) {
+        const didVirtualCssChange = clearManagedModuleState(normalizedId);
+        if (didVirtualCssChange) {
+          invalidateVirtualModules();
+          queueDevCssRefresh();
+        }
+
         if (isRootLayout) {
-          const didVirtualCssChange = clearManagedModuleState(normalizedId);
           managedModules.add(normalizedId);
           nextCode = addVirtualImportToModule(nextCode, { isSvelte, isAstro });
           if (inkConfig.themeMode === "store" && inkConfig.hasThemeStore) {
@@ -4308,14 +4783,10 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               isAstro,
             });
           }
-          if (didVirtualCssChange) {
-            invalidateVirtualModules();
-          }
           return transformedModule(nextCode);
         }
 
         if (isInkModule) {
-          clearManagedModuleState(normalizedId);
           return transformedModule(nextCode);
         }
 
@@ -4331,12 +4802,6 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         nextCode = isSvelte
           ? addVirtualImportToSvelte(nextCode)
           : addVirtualImportToAstro(nextCode);
-        if (inkConfig.themeMode === "store" && inkConfig.hasThemeStore) {
-          nextCode = addThemeStoreRuntimeImport(nextCode, {
-            isSvelte,
-            isAstro,
-          });
-        }
         return transformedModule(nextCode);
       }
 
@@ -4344,9 +4809,61 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         [];
       const importRules = new Set<string>();
       const rules = new Set<string>();
+      const staticMergeIdentifier = createGeneratedIdentifier(
+        transformInputCode,
+        "__inkStaticTailwindMerge",
+      );
+      let needsStaticTailwindMerge = false;
       const resolution = isAstro && !inkConfig.hasExplicitResolution
         ? "static"
         : inkConfig.resolution;
+      const staticConsumedIdentifiers = new Set<string>();
+      if (resolution === "static") {
+        for (const call of calls) {
+          collectStaticExpressionRuntimeIdentifiers(
+            call.callee,
+            normalizedId,
+            staticConsumedIdentifiers,
+          );
+          collectStaticExpressionRuntimeIdentifiers(
+            call.arg,
+            normalizedId,
+            staticConsumedIdentifiers,
+          );
+          const parsedSource = parseStaticExpression(
+            call.arg,
+            undefined,
+            { keepUnresolvedIdentifiers: true },
+          );
+          collectIdentifierReferenceHeads(
+            parsedSource,
+            staticConsumedIdentifiers,
+          );
+        }
+        for (const decl of newInkDecls) {
+          collectStaticExpressionRuntimeIdentifiers(
+            decl.constructorSource,
+            normalizedId,
+            staticConsumedIdentifiers,
+          );
+          for (const assignment of decl.assignments) {
+            collectStaticExpressionRuntimeIdentifiers(
+              assignment.valueSource,
+              normalizedId,
+              staticConsumedIdentifiers,
+            );
+            const parsedSource = parseStaticExpression(
+              assignment.valueSource,
+              undefined,
+              { keepUnresolvedIdentifiers: true },
+            );
+            collectIdentifierReferenceHeads(
+              parsedSource,
+              staticConsumedIdentifiers,
+            );
+          }
+        }
+      }
       const runtimeOptionsForRuntime: LoadedInkConfig["runtimeOptions"] = {
         ...inkConfig.runtimeOptions,
       };
@@ -4509,6 +5026,15 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             });
             continue;
           }
+          if (
+            resolution === "static" && parsed.variantGlobal &&
+            Object.keys(parsed.variantGlobal).length > 0
+          ) {
+            throw staticResolutionError(
+              'resolution="static" cannot preserve runtime-selected variantGlobal rules; move them to global rules or use resolution="hybrid"',
+              call.start,
+            );
+          }
 
           for (const importPath of parsed.imports ?? []) {
             const browserPath = toBrowserStylesheetPath(
@@ -4670,10 +5196,35 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             compiledConfig.variantGlobal = variantGlobalRuleMap;
           }
 
-          const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-          const replacement = `${call.callee}(${runtimeConfigLiteral}, ${
-            JSON.stringify(compiledConfig)
-          }, ${runtimeOptionsLiteral})`;
+          if (parsed.modules) {
+            compiledConfig.modules = parsed.modules;
+          }
+
+          let replacement: string;
+          if (resolution === "static") {
+            const model = toStaticAccessorModel(
+              parsed,
+              classMap,
+              variantClassMap,
+              {
+                breakpoints: inkConfig.breakpoints,
+                containers: inkConfig.containers,
+                defaultUnit: inkConfig.defaultUnit,
+              },
+            );
+            const needsMerge = staticAccessorNeedsTailwindMerge(model);
+            needsStaticTailwindMerge ||= needsMerge;
+            replacement = generateStaticAccessorExpression(model, {
+              mergeFunctionIdentifier: needsMerge
+                ? staticMergeIdentifier
+                : undefined,
+            });
+          } else {
+            const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
+            replacement = `${call.callee}(${runtimeConfigLiteral}, ${
+              JSON.stringify(compiledConfig)
+            }, ${runtimeOptionsLiteral})`;
+          }
           replacements.push({
             start: call.start,
             end: call.end,
@@ -4701,6 +5252,27 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
           );
 
           if (resolution === "dynamic") {
+            replacements.push({
+              start: decl.initializerStart,
+              end: decl.initializerEnd,
+              text: runtimeDeclaration,
+            });
+            continue;
+          }
+
+          if (
+            builderHasInterleavedRuntimeReference(
+              decl,
+              transformInputCode,
+              normalizedId,
+            )
+          ) {
+            if (resolution === "static") {
+              throw staticResolutionError(
+                `resolution="static" cannot fold ${decl.varName} because it is read before its final builder assignment`,
+                decl.start,
+              );
+            }
             replacements.push({
               start: decl.initializerStart,
               end: decl.initializerEnd,
@@ -4974,6 +5546,15 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             });
             continue;
           }
+          if (
+            resolution === "static" && parsed.variantGlobal &&
+            Object.keys(parsed.variantGlobal).length > 0
+          ) {
+            throw staticResolutionError(
+              `resolution="static" cannot preserve runtime-selected variantGlobal rules for ${decl.varName}; move them to global rules or use resolution="hybrid"`,
+              decl.start,
+            );
+          }
 
           for (const importPath of parsed.imports ?? []) {
             const browserPath = toBrowserStylesheetPath(
@@ -5139,10 +5720,31 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             compiledConfig.modules = parsed.modules;
           }
 
-          const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
-          const inkCall = `${decl.constructorSource}(${runtimeConfigLiteral}, ${
-            JSON.stringify(compiledConfig)
-          }, ${runtimeOptionsLiteral})`;
+          let inkCall: string;
+          if (resolution === "static") {
+            const model = toStaticAccessorModel(
+              parsed,
+              classMap,
+              variantClassMap,
+              {
+                breakpoints: inkConfig.breakpoints,
+                containers: inkConfig.containers,
+                defaultUnit: inkConfig.defaultUnit,
+              },
+            );
+            const needsMerge = staticAccessorNeedsTailwindMerge(model);
+            needsStaticTailwindMerge ||= needsMerge;
+            inkCall = generateStaticAccessorExpression(model, {
+              mergeFunctionIdentifier: needsMerge
+                ? staticMergeIdentifier
+                : undefined,
+            });
+          } else {
+            const runtimeConfigLiteral = toRuntimeInkConfigLiteral(parsed);
+            inkCall = `${decl.constructorSource}(${runtimeConfigLiteral}, ${
+              JSON.stringify(compiledConfig)
+            }, ${runtimeOptionsLiteral})`;
+          }
           replacements.push({
             start: decl.initializerStart,
             end: decl.initializerEnd,
@@ -5170,8 +5772,37 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             nextCode.slice(replacement.end);
         }
 
-        if (!isSvelte && !isAstro) {
-          nextCode = stripUnusedStaticHelperConsts(nextCode, normalizedId);
+        const cleanupRegions = extractTransformSourceRegions(
+          nextCode,
+          normalizedId,
+          { isSvelte, isAstro, projectRoot, viteRoot },
+        ).sort((a, b) => b.offset - a.offset);
+        for (const region of cleanupRegions) {
+          const protectedIdentifiers = isSvelte || isAstro
+            ? collectIdentifierMentions(
+              nextCode.slice(0, region.offset) +
+                nextCode.slice(region.offset + region.code.length),
+            )
+            : new Set<string>();
+          const cleanedRegion = stripUnusedStaticHelperConsts(
+            region.code,
+            region.id,
+            resolution === "static" ? staticConsumedIdentifiers : undefined,
+            protectedIdentifiers,
+          );
+          if (cleanedRegion !== region.code) {
+            nextCode = nextCode.slice(0, region.offset) + cleanedRegion +
+              nextCode.slice(region.offset + region.code.length);
+          }
+        }
+        if (needsStaticTailwindMerge) {
+          nextCode = addImportStatementToModule(
+            nextCode,
+            `import { merge as ${staticMergeIdentifier} } from ${
+              JSON.stringify(PUBLIC_STATIC_TAILWIND_MERGE_ID)
+            };`,
+            { isSvelte, isAstro },
+          );
         }
         const needsTailwindRuntimeImport =
           nextCode.includes('"tailwindClassNames"') ||
@@ -5181,7 +5812,6 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         addWatchFiles(this, staticDependencies);
 
         let didVirtualCssChange = false;
-        let scopedVirtualImport: string | null = null;
 
         if (isSvelte) {
           nextCode = addVirtualImportToSvelte(nextCode);
@@ -5213,10 +5843,6 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
               moduleCss.delete(normalizedId);
             }
             didVirtualCssChange = true;
-          }
-
-          if (nextImports.length > 0 || nextCss.length > 0) {
-            scopedVirtualImport = moduleVirtualImportId(normalizedId);
           }
         } else {
           nextCode = isAstro
@@ -5250,27 +5876,20 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
             }
             didVirtualCssChange = true;
           }
-
-          if (nextImports.length > 0 || nextCss.length > 0) {
-            scopedVirtualImport = moduleVirtualImportId(normalizedId);
-          }
         }
 
-        if (scopedVirtualImport) {
-          nextCode = isSvelte
-            ? addVirtualImportToSvelte(nextCode, scopedVirtualImport)
-            : isAstro
-            ? addModuleVirtualImportToAstro(nextCode, scopedVirtualImport)
-            : addVirtualImport(nextCode, scopedVirtualImport);
-        }
-        if (inkConfig.themeMode === "store" && inkConfig.hasThemeStore) {
+        if (
+          inkConfig.themeMode === "store" && inkConfig.hasThemeStore &&
+          (isRootLayout || inkConfig.rootLayout === null)
+        ) {
           nextCode = addThemeStoreRuntimeImport(nextCode, {
             isSvelte,
             isAstro,
           });
         }
         if (didVirtualCssChange) {
-          invalidateVirtualModules(scopedVirtualImport ? [normalizedId] : []);
+          invalidateVirtualModules();
+          queueDevCssRefresh();
         }
 
         return transformedModule(nextCode);
@@ -5380,6 +5999,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         ) {
           affectedModules.add(module);
         }
+        queueDevCssRefresh();
         return affectedModules.size > 0
           ? Array.from(affectedModules)
           : undefined;
@@ -5398,16 +6018,7 @@ export function inkVite(options: InkVitePluginOptions = {}): any {
         }
       }
 
-      if (clearManagedModuleState(normalizedId)) {
-        for (
-          const module of invalidateVirtualModules(
-            [normalizedId],
-            ctx.timestamp,
-            graphInvalidated,
-          )
-        ) {
-          affectedModules.add(module);
-        }
+      if (managedModules.has(normalizedId)) {
         for (
           const module of invalidateModulesByFile(
             normalizedId,
