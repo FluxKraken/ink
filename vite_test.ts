@@ -3254,14 +3254,18 @@ Deno.test("published types accept new ink() Fontsource font assignments", () => 
   `);
 });
 
-Deno.test("published types accept .ink style module imports", () => {
+Deno.test("published types accept .ink config-module imports", () => {
   assertPackageTypesSucceed(`
-    import ink from "@kraken/ink";
+    import { defineInkConfig } from "@kraken/ink";
     import reset from "./reset.ink";
+    import settings from "./settings.ink";
+    import themes from "./theme.ink";
 
-    const styles = new ink();
-    styles.global = reset;
-    styles.base = reset;
+    export default defineInkConfig({
+      import: [{ rules: reset, layer: "reset" }],
+      breakpoints: { default: settings.pageWidth },
+      themes,
+    });
   `);
 });
 

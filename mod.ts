@@ -1,3 +1,5 @@
+/// <reference path="./ink.d.ts" />
+
 /**
  * Deno/JSR entrypoint for the Ink public API.
  * @module
