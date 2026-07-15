@@ -183,6 +183,20 @@ const styles = new ink();
 styles.global = reset;
 ```
 
+TypeScript projects need one project-local ambient declaration for the custom
+`.ink` extension. Add it to a declaration file included by your `tsconfig.json`
+(for example `src/ink.d.ts`, or `src/app.d.ts` in SvelteKit):
+
+```ts
+declare module "*.ink" {
+  const module: Record<string, any>;
+  export default module;
+}
+```
+
+This declaration belongs to the consuming project because JSR packages cannot
+augment global module types from a published entrypoint.
+
 Bare property values and top-level `const` initializers are CSS literals. A
 simple `=name` inside a CSS value interpolates that constant, so units remain
 natural to write:

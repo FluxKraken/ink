@@ -3269,6 +3269,11 @@ Deno.test("published types accept .ink config-module imports", () => {
   `);
 });
 
+Deno.test("JSR entrypoint keeps ambient .ink types opt-in", () => {
+  const entrypoint = Deno.readTextFileSync("mod.ts");
+  assert(!entrypoint.includes('reference path="./ink.d.ts"'));
+});
+
 Deno.test("published types accept nested themes and nested tVar references", () => {
   assertPackageTypesSucceed(`
     import ink, { image, Theme, tVar, type ThemeTokenInput } from "@kraken/ink";
